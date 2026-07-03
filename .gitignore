@@ -1,2 +1,30 @@
+# Dependencies
 node_modules
+
+# Environment variables (never commit real secrets)
 .env
+.env.local
+.env.*.local
+
+# Build output
+dist
+.tsbuildinfo
+
+# Prisma generated client (regenerated on install)
+src/generated
+
+# Logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+pnpm-debug.log*
+
+# Editor
+.vscode/*
+!.vscode/extensions.json
+.idea
+.DS_Store
+
+# Runtime
+.cache
+coverage
