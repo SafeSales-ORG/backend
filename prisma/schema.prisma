@@ -1,0 +1,195 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum EscrowStatus {
+  pending_payment
+  funded
+  shipped
+  delivered
+  completed
+  disputed
+  refunded
+}
+
+enum DisputeStatus {
+  direct_resolution
+  escalated
+  evidence_requested
+  mediating
+  resolved
+}
+
+enum AuthProvider {
+  EMAIL
+  GOOGLE
+  FACEBOOK
+}
+
+model User {
+  id            String       @id @default(cuid())
+  email         String       @unique
+  passwordHash  String?
+  googleId      String?      @unique
+  facebookId    String?      @unique
+  authProvider  AuthProvider
+  emailVerified Boolean      @default(false)
+  nostrNsec     String?
+  nostrNpub     String?
+  createdAt     DateTime     @default(now())
+  updatedAt     DateTime     @updatedAt
+
+  seller        Seller?
+}
+
+model Seller {
+  id       String @id @default(cuid())
+  userId   String @unique
+  user     User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  npub     String @unique
+  handle   String @unique
+  name     String
+  location String
+  phone    String
+  category String
+  bio      String?
+
+  bankName    String?
+  bankCode    String
+  bankAccount String?
+  bankHolder  String?
+  bankVerifiedName String?
+  bankVerifiedAt   DateTime?
+
+  lnAddress String?
+
+  verified  Boolean  @default(false)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  listings Listing[]
+  orders   Order[]
+
+  @@index([handle])
+}
+
+model Listing {
+  id       String @id @default(cuid())
+  sellerId String
+  seller   Seller @relation(fields: [sellerId], references: [id], onDelete: Cascade)
+
+  title       String
+  description String
+  priceNGN    Int
+  images      Json
+  category    String
+  variants    Json?
+  inStock     Int     @default(1)
+  delivery    String?
+  active      Boolean @default(true)
+
+  nostrEventId String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  orders Order[]
+
+  @@index([sellerId])
+  @@index([active])
+}
+
+model Order {
+  id         String @id @default(cuid())
+  shortId    String @unique
+  orderToken String @unique
+
+  listingId String
+  listing   Listing @relation(fields: [listingId], references: [id])
+  sellerId  String
+  seller    Seller  @relation(fields: [sellerId], references: [id])
+
+  buyerNpub   String
+  buyerPubkey String
+
+  buyerName     String
+  buyerPhone    String
+  buyerEmail    String?
+  buyerCity     String
+  buyerAddress  String?
+  contactMethod String?
+
+  variant String?
+
+  amountNGN Int
+
+  status EscrowStatus @default(pending_payment)
+
+  nombaAccountNo   String?
+  nombaAccountName String?
+  nombaBankName    String?
+  nombaReference   String?
+
+  trackingNumber String?
+  carrier        String?
+
+  shippedAt  DateTime?
+  releasedAt DateTime?
+  refundedAt DateTime?
+
+  autoReleaseAt DateTime?
+
+  notes String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  dispute Dispute?
+
+  @@index([sellerId])
+  @@index([buyerPubkey])
+  @@index([status])
+  @@index([autoReleaseAt])
+}
+
+model WebhookEvent {
+  id          String   @id @default(cuid())
+  provider    String   // "nomba"
+  externalId  String   @unique
+  payload     Json
+  status      String   // "received" | "processed" | "failed"
+  attempts    Int      @default(0)
+  receivedAt  DateTime @default(now())
+}
+
+model Dispute {
+  id      String @id @default(cuid())
+  orderId String @unique
+  order   Order  @relation(fields: [orderId], references: [id], onDelete: Cascade)
+
+  reason   String
+  summary  String?
+  openedBy String
+  priority String  @default("medium")
+
+  status DisputeStatus @default(direct_resolution)
+
+  directResolutionUntil DateTime?
+  evidenceDueAt         DateTime?
+
+  isReturn       Boolean @default(false)
+  returnEvidence Json?
+
+  resolution Json?
+
+  createdAt  DateTime  @default(now())
+  resolvedAt DateTime?
+
+  @@index([status])
+}
