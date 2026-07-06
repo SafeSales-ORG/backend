@@ -69,7 +69,12 @@ npm start      # node dist/index.js
 - `NOMBA_SIMULATION` (optional, `"true"` enables dev routes)
 - `SUPPORT_EMAIL`, `PLATFORM_FEE_BPS`
 
+## Completed (Latest Round)
+- Smoke test: full flow verified (15/15 passing) ✓
+- Stale `scripts/smoke.ts` deleted (MavaPay-era) ✓
+- `email.ts` field rename (`amountNGN` → `priceNGN`) ✓
+- Package.json `npm run smoke` now points to `scripts/smoke-test.ts` ✓
+
 ## Next Steps
-1. Create smoke test script (register → create seller → create listing → create order → simulate payment → release)
-2. Set up .env.production for mainnet deployment
-3. Frontend integration (separate developer)
+1. Set up `.env.production` for mainnet deployment (real Nomba credentials, different JWT secret, production DB)
+2. Frontend integration (separate developer)

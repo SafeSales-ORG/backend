@@ -11,7 +11,7 @@ interface BuyerOrderEmailInput {
     orderToken: string;
     buyerEmail: string | null;
     buyerName: string;
-    amountNGN: number;
+    priceNGN: number;
   };
   listing: {
     title: string;
@@ -83,7 +83,7 @@ export async function sendBuyerOrderLinkEmail({
   const safeTitle = escapeHtml(listing.title);
   const safeShortId = escapeHtml(order.shortId);
   const safeOrderLink = escapeHtml(orderLink);
-  const amount = escapeHtml(formatNGN(order.amountNGN));
+  const amount = escapeHtml(formatNGN(order.priceNGN));
 
   const subject = `Your SafeSale order ${order.shortId} is secured`;
   const html = `
