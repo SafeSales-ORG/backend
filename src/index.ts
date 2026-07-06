@@ -6,6 +6,12 @@ import { HttpError } from './lib/errors.js';
 import { ZodError } from 'zod';
 
 import authRoutes from './routes/auth.js';
+import sellersRoutes from './routes/sellers.js';
+import listingsRoutes from './routes/listings.js';
+import ordersRoutes from './routes/orders.js';
+import nombaRoutes from './routes/nomba.js';
+import devRoutes from './routes/dev.js';
+import { startAutoReleaseCron } from './services/scheduler.js';
 
 const app = Fastify({
   logger: false,
@@ -60,12 +66,18 @@ async function start() {
   });
 
   await app.register(authRoutes);
+  await app.register(sellersRoutes);
+  await app.register(listingsRoutes);
+  await app.register(ordersRoutes);
+  await app.register(nombaRoutes);
+  await app.register(devRoutes);
 
   app.get('/health', async () => ({ status: 'ok', timestamp: new Date().toISOString() }));
 
   try {
     await app.listen({ port: env.PORT, host: '0.0.0.0' });
     logger.info({ port: env.PORT }, 'Server started');
+    startAutoReleaseCron();
   } catch (err) {
     logger.fatal({ err }, 'Failed to start server');
     process.exit(1);

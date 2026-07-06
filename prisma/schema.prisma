@@ -44,7 +44,8 @@ model User {
   createdAt     DateTime     @default(now())
   updatedAt     DateTime     @updatedAt
 
-  seller        Seller?
+  seller Seller?
+  orders Order[]
 }
 
 model Seller {
@@ -52,22 +53,17 @@ model Seller {
   userId   String @unique
   user     User   @relation(fields: [userId], references: [id], onDelete: Cascade)
 
-  npub     String @unique
-  handle   String @unique
-  name     String
-  location String
-  phone    String
-  category String
-  bio      String?
+  npub   String @unique
+  handle String @unique
+  name   String
+  avatar String?
+  bio    String?
+  delivery String?
 
-  bankName    String?
-  bankCode    String
-  bankAccount String?
-  bankHolder  String?
-  bankVerifiedName String?
-  bankVerifiedAt   DateTime?
-
-  lnAddress String?
+  bankCode           String
+  bankName           String?
+  bankAccountNumber  String
+  bankAccountName    String?
 
   verified  Boolean  @default(false)
   createdAt DateTime @default(now())
@@ -94,8 +90,6 @@ model Listing {
   delivery    String?
   active      Boolean @default(true)
 
-  nostrEventId String?
-
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
@@ -115,29 +109,25 @@ model Order {
   sellerId  String
   seller    Seller  @relation(fields: [sellerId], references: [id])
 
-  buyerNpub   String
-  buyerPubkey String
+  buyerId String?
+  buyer   User?   @relation(fields: [buyerId], references: [id])
 
-  buyerName     String
-  buyerPhone    String
-  buyerEmail    String?
-  buyerCity     String
-  buyerAddress  String?
-  contactMethod String?
+  buyerName  String
+  buyerPhone String?
+  buyerEmail String?
+  deliveryAddress String?
 
-  variant String?
+  quantity Int    @default(1)
+  variant  String?
 
-  amountNGN Int
+  priceNGN Int
 
   status EscrowStatus @default(pending_payment)
 
-  nombaAccountNo   String?
-  nombaAccountName String?
-  nombaBankName    String?
-  nombaReference   String?
-
-  trackingNumber String?
-  carrier        String?
+  accountNumber String?
+  accountName   String?
+  bankName      String?
+  nombaReference String?
 
   shippedAt  DateTime?
   releasedAt DateTime?
@@ -153,17 +143,16 @@ model Order {
   dispute Dispute?
 
   @@index([sellerId])
-  @@index([buyerPubkey])
   @@index([status])
   @@index([autoReleaseAt])
 }
 
 model WebhookEvent {
   id          String   @id @default(cuid())
-  provider    String   // "nomba"
+  provider    String
   externalId  String   @unique
   payload     Json
-  status      String   // "received" | "processed" | "failed"
+  status      String
   attempts    Int      @default(0)
   receivedAt  DateTime @default(now())
 }
