@@ -154,6 +154,14 @@ export interface VirtualAccountResult {
 }
 
 export async function createVirtualAccount(params: CreateVirtualAccountParams): Promise<VirtualAccountResult> {
+  if (env.NOMBA_MOCK) {
+    return {
+      accountNumber: `0${1000000000 + Math.floor(Math.random() * 900000000)}`,
+      bankName: 'Mock Bank',
+      accountName: params.accountName,
+      accountRef: params.accountRef,
+    };
+  }
   const response = await apiPost<{
     code: string;
     description: string;
@@ -193,6 +201,12 @@ export interface BankLookupResult {
 }
 
 export async function bankAccountLookup(params: BankLookupParams): Promise<BankLookupResult> {
+  if (env.NOMBA_MOCK) {
+    return {
+      accountNumber: params.accountNumber,
+      accountName: 'John Doe',
+    };
+  }
   const response = await apiPost<{
     code: string;
     description: string;
@@ -230,6 +244,12 @@ export interface BankTransferResult {
 }
 
 export async function transferToBank(params: BankTransferParams): Promise<BankTransferResult> {
+  if (env.NOMBA_MOCK) {
+    return {
+      status: 'success',
+      transactionId: `mock_tx_${Date.now()}`,
+    };
+  }
   const response = await apiPost<{
     code: string;
     description: string;
@@ -243,6 +263,7 @@ export async function transferToBank(params: BankTransferParams): Promise<BankTr
     accountName: params.accountName,
     bankCode: params.bankCode,
     merchantTxRef: params.merchantTxRef,
+    senderName: 'SafeSale',
     ...(params.narration && { narration: params.narration }),
   });
 

@@ -67,6 +67,10 @@ const EnvSchema = z.object({
     .string()
     .optional()
     .transform((v) => v === 'true'),
+  NOMBA_MOCK: z
+    .string()
+    .optional()
+    .transform((v) => v === 'true'),
 
   // SafeSale fee
   SAFESALE_FEE_LN_ADDRESS: z.string().optional().transform((v) => v || undefined),
