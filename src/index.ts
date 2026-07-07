@@ -19,6 +19,14 @@ const app = Fastify({
   trustProxy: true,
 });
 
+app.addContentTypeParser('application/json', { parseAs: 'string' }, (_req, body, done) => {
+  try {
+    done(null, body === '' ? {} : JSON.parse(body as string));
+  } catch (err) {
+    done(err as Error, undefined);
+  }
+});
+
 app.setErrorHandler((error: unknown, _request, reply) => {
   if (error instanceof HttpError) {
     return reply.status(error.status).send({ error: error.toPayload() });
