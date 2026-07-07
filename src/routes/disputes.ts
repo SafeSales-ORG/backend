@@ -4,6 +4,7 @@ import { prisma } from '../db/client.js';
 import { BadRequest, NotFound, Forbidden } from '../lib/errors.js';
 import { requireAuth, requireMediator } from '../middleware/auth.js';
 import { normalizeOrder, normalizeSeller, normalizeListing, normalizeDispute } from '../lib/normalize.js';
+import { transferToBank } from '../services/nomba.js';
 
 const OpenDisputeSchema = z.object({
   orderToken: z.string().min(1),
@@ -321,7 +322,7 @@ const disputesRoute: FastifyPluginAsync = async (app) => {
 
       const dispute = await prisma.dispute.findUnique({
         where: { id: request.params.id },
-        include: { order: true },
+        include: { order: { include: { seller: true } } },
       });
       if (!dispute) throw new NotFound('Dispute not found');
 
@@ -335,7 +336,7 @@ const disputesRoute: FastifyPluginAsync = async (app) => {
       const sellerReleaseNGN = amount - buyerRefundNGN;
       const nextStatus = body.outcome === 'refund_buyer' ? 'refunded' : 'released';
 
-      const resolution = {
+      const resolution: Record<string, unknown> = {
         outcome: body.outcome,
         buyerRefundNGN,
         sellerReleaseNGN,
@@ -344,21 +345,46 @@ const disputesRoute: FastifyPluginAsync = async (app) => {
         resolvedAt: new Date().toISOString(),
       };
 
+      let transferTxRef: string | null = null;
+
+      if (sellerReleaseNGN > 0) {
+        const seller = dispute.order.seller;
+        if (
+          seller.bankAccountNumber &&
+          seller.bankCode &&
+          seller.bankAccountName
+        ) {
+          const transfer = await transferToBank({
+            amount: sellerReleaseNGN,
+            accountNumber: seller.bankAccountNumber,
+            accountName: seller.bankAccountName,
+            bankCode: seller.bankCode,
+            merchantTxRef: `resolve_${dispute.id}_${Date.now()}`,
+            narration: `SafeSale dispute resolution — seller share of order ${dispute.order.shortId}`,
+          });
+          transferTxRef = transfer.transactionId;
+          resolution.transferTxRef = transferTxRef;
+        }
+      }
+
       const updated = await prisma.dispute.update({
         where: { id: dispute.id },
         data: {
           status: 'resolved',
           resolvedAt: new Date(),
-          resolution,
+          resolution: resolution as unknown as any,
         },
       });
 
+      const orderUpdate: Record<string, unknown> = {
+        status: nextStatus,
+        ...(nextStatus === 'released' ? { releasedAt: new Date() } : { refundedAt: new Date() }),
+      };
+      if (transferTxRef) orderUpdate.nombaReference = transferTxRef;
+
       await prisma.order.update({
         where: { id: dispute.orderId },
-        data: {
-          status: nextStatus,
-          ...(nextStatus === 'released' ? { releasedAt: new Date() } : { refundedAt: new Date() }),
-        },
+        data: orderUpdate,
       });
 
       const updatedOrder = await prisma.order.findUnique({
