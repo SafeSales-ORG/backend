@@ -12,7 +12,7 @@ enum EscrowStatus {
   funded
   shipped
   delivered
-  completed
+  released
   disputed
   refunded
 }
@@ -23,6 +23,12 @@ enum DisputeStatus {
   evidence_requested
   mediating
   resolved
+}
+
+enum UserRole {
+  USER
+  MEDIATOR
+  ADMIN
 }
 
 enum AuthProvider {
@@ -37,8 +43,9 @@ model User {
   passwordHash  String?
   googleId      String?      @unique
   facebookId    String?      @unique
+  role          UserRole       @default(USER)
   authProvider  AuthProvider
-  emailVerified Boolean      @default(false)
+  emailVerified Boolean        @default(false)
   nostrNsec     String?
   nostrNpub     String?
   createdAt     DateTime     @default(now())
@@ -46,6 +53,7 @@ model User {
 
   seller Seller?
   orders Order[]
+  disputeMessages DisputeMessage[]
 }
 
 model Seller {
@@ -86,8 +94,9 @@ model Listing {
   images      Json
   category    String
   variants    Json?
-  inStock     Int     @default(1)
+  inStock     Int      @default(1)
   delivery    String?
+  deliveryFee Int?
   active      Boolean @default(true)
 
   createdAt DateTime @default(now())
@@ -129,7 +138,11 @@ model Order {
   bankName      String?
   nombaReference String?
 
+  trackingNumber String?
+  carrier        String?
+
   shippedAt  DateTime?
+  deliveredAt DateTime?
   releasedAt DateTime?
   refundedAt DateTime?
 
@@ -177,8 +190,23 @@ model Dispute {
 
   resolution Json?
 
+  messages DisputeMessage[]
+
   createdAt  DateTime  @default(now())
   resolvedAt DateTime?
 
   @@index([status])
+}
+
+model DisputeMessage {
+  id        String   @id @default(cuid())
+  disputeId String
+  dispute   Dispute  @relation(fields: [disputeId], references: [id], onDelete: Cascade)
+  authorId  String
+  author    User     @relation(fields: [authorId], references: [id])
+  content   String
+  createdAt DateTime @default(now())
+
+  @@index([disputeId])
+  @@index([authorId])
 }

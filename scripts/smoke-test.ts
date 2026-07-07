@@ -51,15 +51,15 @@ async function step(name: string, fn: () => Promise<{ ok: boolean; detail?: stri
   }
 }
 
+function r(res: { status: number; ok: boolean; data: unknown }): { ok: boolean; detail: string } {
+  return { ok: res.ok, detail: `[${res.status}] ${JSON.stringify(res.data).slice(0, 300)}` };
+}
+
 async function main() {
   console.log(`\nSafeSale Smoke Test\n`);
   console.log(`Base URL: ${BASE}`);
   console.log(`Test email: ${EMAIL}`);
   console.log(`Test handle: ${HANDLE}\n`);
-
-  function r(res: { status: number; ok: boolean; data: unknown }): { ok: boolean; detail: string } {
-    return { ok: res.ok, detail: `[${res.status}] ${JSON.stringify(res.data).slice(0, 300)}` };
-  }
 
   // 1. Health check
   await step('GET /health', async () => {
@@ -133,6 +133,7 @@ async function main() {
       category: 'Testing',
       inStock: 10,
       delivery: 'Free shipping',
+      deliveryFee: 1000,
     }, jwt);
     if (!res.ok || typeof res.data !== 'object' || res.data === null) return r(res);
     const d = res.data as Record<string, unknown>;
@@ -157,7 +158,16 @@ async function main() {
     return { ok: Array.isArray(listings) && listings.length > 0 };
   });
 
-  // 10. Create order
+  // 10. PATCH listing (edit)
+  await step('PATCH /api/listings/:id', async () => {
+    const res = await request('PATCH', `/api/listings/${listingId}`, { title: 'Updated Smoke Item' }, jwt);
+    if (!res.ok) return r(res);
+    const d = res.data as Record<string, unknown>;
+    const listing = d.listing as Record<string, unknown> | undefined;
+    return { ok: listing?.title === 'Updated Smoke Item' };
+  });
+
+  // 11. Create order
   await step('POST /api/orders', async () => {
     const res = await request('POST', '/api/orders', {
       listingId,
@@ -174,13 +184,13 @@ async function main() {
     return { ok: order.status === 'pending_payment' };
   });
 
-  // 11. Get order by token
+  // 12. Get order by token
   await step('GET /api/orders/:token', async () => {
     const res = await request('GET', `/api/orders/${orderToken}`);
     return res.ok ? { ok: true } : r(res);
   });
 
-  // 12. Simulate payment
+  // 13. Simulate payment
   await step('POST /api/dev/simulate-payment', async () => {
     const res = await request('POST', '/api/dev/simulate-payment', {
       orderToken,
@@ -191,7 +201,7 @@ async function main() {
 
   await sleep(500);
 
-  // 13. Get seller orders (verify funded)
+  // 14. Get seller orders (verify funded)
   await step('GET /api/orders (seller, verify funded)', async () => {
     const res = await request('GET', '/api/orders', undefined, jwt);
     if (!res.ok) return r(res);
@@ -201,19 +211,66 @@ async function main() {
     return { ok: (orders[0] as Record<string, unknown>).status === 'funded' };
   });
 
-  // 14. Release funds
+  // 15. Seller dashboard by npub
+  await step('GET /api/orders/seller/:npub', async () => {
+    const res = await request('GET', `/api/orders/seller/${sellerNpub}`);
+    if (!res.ok) return r(res);
+    const d = res.data as Record<string, unknown>;
+    const orders = d.orders as unknown[];
+    return { ok: Array.isArray(orders) && orders.length > 0 };
+  });
+
+  // 16. Ship order
+  await step('PATCH /api/orders/:token/ship', async () => {
+    const res = await request('PATCH', `/api/orders/${orderToken}/ship`, {
+      trackingNumber: 'SMOKE123456',
+      carrier: 'Test Courier',
+    }, jwt);
+    if (!res.ok) return r(res);
+    const d = res.data as Record<string, unknown>;
+    const order = d.order as Record<string, unknown> | undefined;
+    return { ok: order?.status === 'shipped' };
+  });
+
+  // 17. Deliver order
+  await step('POST /api/orders/:token/deliver', async () => {
+    const res = await request('POST', `/api/orders/${orderToken}/deliver`, undefined, jwt);
+    if (!res.ok) return r(res);
+    const d = res.data as Record<string, unknown>;
+    const order = d.order as Record<string, unknown> | undefined;
+    return { ok: order?.status === 'delivered' };
+  });
+
+  // 18. Release funds
   await step('POST /api/orders/:token/release', async () => {
     const res = await request('POST', `/api/orders/${orderToken}/release`, undefined, jwt);
     return res.ok ? { ok: true } : r(res);
   });
 
-  // 15. Verify shipped
-  await step('GET /api/orders/:token (verify shipped)', async () => {
+  // 19. Verify released
+  await step('GET /api/orders/:token (verify released)', async () => {
     const res = await request('GET', `/api/orders/${orderToken}`);
     if (!res.ok) return r(res);
     const d = res.data as Record<string, unknown>;
     const order = d.order as Record<string, unknown> | undefined;
-    return { ok: order?.status === 'shipped', detail: `status=${order?.status}` };
+    return { ok: order?.status === 'released', detail: `status=${order?.status}` };
+  });
+
+  // 20. Delete listing (soft delete)
+  await step('DELETE /api/listings/:id', async () => {
+    const res = await request('DELETE', `/api/listings/${listingId}`, undefined, jwt);
+    return res.ok ? { ok: true } : r(res);
+  });
+
+  // 21. Mediator login
+  await step('POST /api/auth/mediator/login', async () => {
+    const res = await request('POST', '/api/auth/mediator/login', {
+      email: 'mediator@safesale.app',
+      password: 'mediator-dev-password',
+    });
+    if (!res.ok) return r(res);
+    const d = res.data as Record<string, unknown>;
+    return { ok: typeof d.token === 'string' && (d.user as Record<string, unknown>)?.role === 'MEDIATOR' };
   });
 
   console.log(`\nResults: ${passed} passed, ${failed} failed, ${passed + failed} total\n`);

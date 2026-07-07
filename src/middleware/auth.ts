@@ -38,3 +38,14 @@ export async function optionalAuth(request: FastifyRequest, _reply: FastifyReply
     // Silently ignore — user stays null
   }
 }
+
+export async function requireMediator(request: FastifyRequest, reply: FastifyReply) {
+  await requireAuth(request, reply);
+  if (reply.sent) return;
+
+  if (request.user!.role !== 'MEDIATOR') {
+    return reply.status(403).send({
+      error: { code: 'FORBIDDEN', message: 'Mediator access required' },
+    });
+  }
+}

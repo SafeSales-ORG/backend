@@ -19,6 +19,20 @@ const CreateListingSchema = z.object({
   variants: z.array(z.string().max(60)).optional(),
   inStock: z.number().int().nonnegative().default(1),
   delivery: z.string().max(140).optional(),
+  deliveryFee: z.number().int().nonnegative().optional(),
+});
+
+const UpdateListingSchema = z.object({
+  title: z.string().min(3).max(140).optional(),
+  description: z.string().min(10).max(2000).optional(),
+  priceNGN: z.number().int().positive().max(50_000_000).optional(),
+  images: z.array(ImageSchema).min(1).max(8).optional(),
+  category: z.string().min(2).max(60).optional(),
+  variants: z.array(z.string().max(60)).optional(),
+  inStock: z.number().int().nonnegative().optional(),
+  delivery: z.string().max(140).optional(),
+  deliveryFee: z.number().int().nonnegative().optional(),
+  active: z.boolean().optional(),
 });
 
 const ListingsQuerySchema = z.object({
@@ -46,6 +60,7 @@ const listingsRoute: FastifyPluginAsync = async (app) => {
         variants: body.variants,
         inStock: body.inStock,
         delivery: body.delivery,
+        deliveryFee: body.deliveryFee,
       },
     });
 
@@ -62,6 +77,50 @@ const listingsRoute: FastifyPluginAsync = async (app) => {
 
     return { listing, seller: listing.seller };
   });
+
+  app.patch<{ Params: { id: string } }>(
+    '/api/listings/:id',
+    { preHandler: [requireAuth] },
+    async (request) => {
+      const body = UpdateListingSchema.parse(request.body);
+
+      const listing = await prisma.listing.findUnique({ where: { id: request.params.id } });
+      if (!listing) throw new NotFound('Listing not found');
+
+      const seller = await prisma.seller.findUnique({ where: { userId: request.user!.sub } });
+      if (!seller || listing.sellerId !== seller.id) {
+        throw new BadRequest('You are not the owner of this listing');
+      }
+
+      const updated = await prisma.listing.update({
+        where: { id: listing.id },
+        data: body,
+      });
+
+      return { listing: updated };
+    },
+  );
+
+  app.delete<{ Params: { id: string } }>(
+    '/api/listings/:id',
+    { preHandler: [requireAuth] },
+    async (request) => {
+      const listing = await prisma.listing.findUnique({ where: { id: request.params.id } });
+      if (!listing) throw new NotFound('Listing not found');
+
+      const seller = await prisma.seller.findUnique({ where: { userId: request.user!.sub } });
+      if (!seller || listing.sellerId !== seller.id) {
+        throw new BadRequest('You are not the owner of this listing');
+      }
+
+      await prisma.listing.update({
+        where: { id: listing.id },
+        data: { active: false },
+      });
+
+      return { ok: true };
+    },
+  );
 
   app.get('/api/listings', async (request) => {
     const query = ListingsQuerySchema.parse(request.query);

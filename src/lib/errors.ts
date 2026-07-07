@@ -43,6 +43,12 @@ export class NotFound extends HttpError {
   }
 }
 
+export class Forbidden extends HttpError {
+  constructor(message: string, details?: unknown) {
+    super(403, 'FORBIDDEN', message, details);
+  }
+}
+
 export class Conflict extends HttpError {
   constructor(message: string, details?: unknown) {
     super(409, 'CONFLICT', message, details);

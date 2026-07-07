@@ -9,7 +9,7 @@ async function releaseExpiredOrders(): Promise<void> {
 
   const orders = await prisma.order.findMany({
     where: {
-      status: 'shipped',
+      status: { in: ['shipped', 'delivered'] },
       autoReleaseAt: { lte: now },
     },
     include: { seller: true },
@@ -47,9 +47,9 @@ async function releaseExpiredOrders(): Promise<void> {
       });
 
       const updated = await prisma.order.updateMany({
-        where: { id: order.id, status: 'shipped' },
+        where: { id: order.id, status: { in: ['shipped', 'delivered'] } },
         data: {
-          status: 'completed',
+          status: 'released',
           releasedAt: new Date(),
           notes: `Auto-released. Nomba ref: ${result.transactionId}. Fee: ₦${fee}`,
         },

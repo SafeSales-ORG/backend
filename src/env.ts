@@ -72,6 +72,10 @@ const EnvSchema = z.object({
     .optional()
     .transform((v) => v === 'true'),
 
+  // Mediator
+  MEDIATOR_EMAIL: z.string().email().default('mediator@safesale.app'),
+  MEDIATOR_PASSWORD: z.string().min(8).default('mediator-dev-password'),
+
   // SafeSale fee
   SAFESALE_FEE_LN_ADDRESS: z.string().optional().transform((v) => v || undefined),
 

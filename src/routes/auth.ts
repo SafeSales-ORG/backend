@@ -1,9 +1,12 @@
 import { FastifyInstance } from 'fastify';
 import { z } from 'zod';
+import jwt from 'jsonwebtoken';
 import { register, login, findOrCreateGoogleUser } from '../services/auth.js';
+import type { JwtPayload } from '../services/auth.js';
 import { requireAuth } from '../middleware/auth.js';
 import { prisma } from '../db/client.js';
-import { BadRequest } from '../lib/errors.js';
+import { BadRequest, Unauthorized } from '../lib/errors.js';
+import { env } from '../env.js';
 
 const RegisterSchema = z.object({
   email: z.string().email(),
@@ -82,5 +85,24 @@ export default async function authRoutes(app: FastifyInstance) {
     }
 
     return reply.send({ user });
+  });
+
+  app.post('/api/auth/mediator/login', async (request, reply) => {
+    const { email, password } = request.body as { email?: string; password?: string };
+    if (!email || !password) throw new BadRequest('Email and password required');
+
+    if (email !== env.MEDIATOR_EMAIL || password !== env.MEDIATOR_PASSWORD) {
+      throw new Unauthorized('Invalid mediator credentials');
+    }
+
+    const payload: JwtPayload & { role: string } = {
+      sub: 'mediator',
+      email,
+      nostrNpub: null,
+      role: 'MEDIATOR',
+    };
+    const token = jwt.sign(payload, env.JWT_SECRET, { expiresIn: '24h' });
+
+    return reply.send({ token, user: { email, role: 'MEDIATOR' } });
   });
 }

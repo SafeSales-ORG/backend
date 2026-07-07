@@ -11,6 +11,7 @@ import listingsRoutes from './routes/listings.js';
 import ordersRoutes from './routes/orders.js';
 import nombaRoutes from './routes/nomba.js';
 import devRoutes from './routes/dev.js';
+import disputesRoutes from './routes/disputes.js';
 import { startAutoReleaseCron } from './services/scheduler.js';
 
 const app = Fastify({
@@ -71,6 +72,7 @@ async function start() {
   await app.register(ordersRoutes);
   await app.register(nombaRoutes);
   await app.register(devRoutes);
+  await app.register(disputesRoutes);
 
   app.get('/health', async () => ({ status: 'ok', timestamp: new Date().toISOString() }));
 
