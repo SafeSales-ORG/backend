@@ -4,6 +4,7 @@ import { prisma } from '../db/client.js';
 import { BadRequest, NotFound } from '../lib/errors.js';
 import { requireAuth } from '../middleware/auth.js';
 import { bankAccountLookup } from '../services/nomba.js';
+import { normalizeSeller } from '../lib/normalize.js';
 
 const CreateSellerSchema = z.object({
   name: z.string().min(2).max(140),
@@ -73,7 +74,7 @@ const sellersRoute: FastifyPluginAsync = async (app) => {
     });
 
     reply.code(201);
-    return { seller };
+    return { seller: normalizeSeller(seller as unknown as Record<string, unknown>) };
   });
 
   app.get('/api/sellers/:handle', async (request) => {
@@ -89,12 +90,13 @@ const sellersRoute: FastifyPluginAsync = async (app) => {
         bio: true,
         delivery: true,
         npub: true,
+        verified: true,
         createdAt: true,
       },
     });
     if (!seller) throw new NotFound('Seller not found');
 
-    return { seller };
+    return { seller: normalizeSeller(seller as unknown as Record<string, unknown>) };
   });
 
   app.put('/api/sellers', { preHandler: [requireAuth] }, async (request) => {
@@ -119,7 +121,7 @@ const sellersRoute: FastifyPluginAsync = async (app) => {
         },
       });
 
-      return { seller: updated };
+      return { seller: normalizeSeller(updated as unknown as Record<string, unknown>) };
     }
 
     const updated = await prisma.seller.update({
@@ -127,7 +129,7 @@ const sellersRoute: FastifyPluginAsync = async (app) => {
       data: body,
     });
 
-    return { seller: updated };
+    return { seller: normalizeSeller(updated as unknown as Record<string, unknown>) };
   });
 };
 

@@ -5,6 +5,7 @@ import { prisma } from '../db/client.js';
 import { BadRequest, NotFound } from '../lib/errors.js';
 import { requireAuth, optionalAuth } from '../middleware/auth.js';
 import { createVirtualAccount, transferToBank } from '../services/nomba.js';
+import { normalizeOrder, normalizeSeller, normalizeListing, normalizeDispute } from '../lib/normalize.js';
 
 const CreateOrderSchema = z.object({
   listingId: z.string().min(1),
@@ -14,6 +15,14 @@ const CreateOrderSchema = z.object({
   buyerPhone: z.string().optional(),
   buyerEmail: z.string().email().optional(),
 });
+
+async function getOrderWithDispute(token: string) {
+  const order = await prisma.order.findUnique({
+    where: { orderToken: token },
+    include: { listing: true, seller: true, dispute: true },
+  });
+  return order;
+}
 
 const ordersRoute: FastifyPluginAsync = async (app) => {
   app.post('/api/orders', { preHandler: [optionalAuth] }, async (request, reply) => {
@@ -82,16 +91,15 @@ const ordersRoute: FastifyPluginAsync = async (app) => {
   app.get('/api/orders/:token', async (request) => {
     const { token } = request.params as { token: string };
 
-    const order = await prisma.order.findUnique({
-      where: { orderToken: token },
-      include: {
-        listing: true,
-        seller: true,
-      },
-    });
+    const order = await getOrderWithDispute(token);
     if (!order) throw new NotFound('Order not found');
 
-    return { order };
+    return {
+      order: normalizeOrder(order as unknown as Record<string, unknown>),
+      listing: normalizeListing(order.listing as unknown as Record<string, unknown>),
+      seller: normalizeSeller(order.seller as unknown as Record<string, unknown>),
+      dispute: normalizeDispute(order.dispute as unknown as Record<string, unknown> | null),
+    };
   });
 
   app.get('/api/orders', { preHandler: [requireAuth] }, async (request) => {
@@ -114,11 +122,17 @@ const ordersRoute: FastifyPluginAsync = async (app) => {
         sellerId: seller.id,
         createdAt: { gte: oneWeekAgo },
       },
-      include: { listing: true },
+      include: { listing: true, dispute: true },
       orderBy: { createdAt: 'desc' },
     });
 
-    return { orders };
+    return {
+      orders: orders.map((o) => ({
+        ...normalizeOrder(o as unknown as Record<string, unknown>),
+        listing: normalizeListing(o.listing as unknown as Record<string, unknown>),
+        dispute: normalizeDispute((o as any).dispute ?? null),
+      })),
+    };
   });
 
   app.get<{ Params: { npub: string } }>('/api/orders/seller/:npub', async (request) => {
@@ -136,7 +150,14 @@ const ordersRoute: FastifyPluginAsync = async (app) => {
       orderBy: { createdAt: 'desc' },
     });
 
-    return { orders, seller };
+    return {
+      orders: orders.map((o) => ({
+        ...normalizeOrder(o as unknown as Record<string, unknown>),
+        listing: normalizeListing(o.listing as unknown as Record<string, unknown>),
+        dispute: normalizeDispute((o as any).dispute ?? null),
+      })),
+      seller: normalizeSeller(seller as unknown as Record<string, unknown>),
+    };
   });
 
   app.patch<{ Params: { token: string } }>(
@@ -164,7 +185,37 @@ const ordersRoute: FastifyPluginAsync = async (app) => {
         data: { status: 'shipped', trackingNumber, carrier, shippedAt: new Date() },
       });
 
-      return { order: updated };
+      return { order: normalizeOrder(updated as unknown as Record<string, unknown>) };
+    },
+  );
+
+  /* POST alias for ship — frontend calls POST, backend has PATCH */
+  app.post<{ Params: { token: string } }>(
+    '/api/orders/:token/ship',
+    { preHandler: [requireAuth] },
+    async (request) => {
+      const order = await prisma.order.findUnique({
+        where: { orderToken: request.params.token },
+        include: { seller: true },
+      });
+      if (!order) throw new NotFound('Order not found');
+      if (order.status !== 'funded') throw new BadRequest('Order must be funded before shipping');
+      if (order.seller.userId !== request.user!.sub) {
+        throw new BadRequest('You are not the seller of this order');
+      }
+
+      const { trackingNumber, carrier } = request.body as {
+        trackingNumber?: string;
+        carrier?: string;
+      };
+      if (!trackingNumber) throw new BadRequest('trackingNumber is required');
+
+      const updated = await prisma.order.update({
+        where: { id: order.id },
+        data: { status: 'shipped', trackingNumber, carrier, shippedAt: new Date() },
+      });
+
+      return { order: normalizeOrder(updated as unknown as Record<string, unknown>) };
     },
   );
 
@@ -190,7 +241,7 @@ const ordersRoute: FastifyPluginAsync = async (app) => {
         data: { status: 'delivered', deliveredAt: new Date() },
       });
 
-      return { order: updated };
+      return { order: normalizeOrder(updated as unknown as Record<string, unknown>) };
     },
   );
 
@@ -219,12 +270,15 @@ const ordersRoute: FastifyPluginAsync = async (app) => {
         merchantTxRef: `rel_${order.orderToken}`,
       });
 
-      await prisma.order.update({
+      const updated = await prisma.order.update({
         where: { id: order.id },
         data: { status: 'released', releasedAt: new Date(), nombaReference: transfer.transactionId },
       });
 
-      return { ok: true, transfer };
+      return {
+        order: normalizeOrder(updated as unknown as Record<string, unknown>),
+        txRef: transfer.transactionId,
+      };
     },
   );
 };
