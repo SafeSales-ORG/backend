@@ -46,6 +46,11 @@ const MediatorUpdateSchema = z.object({
   status: z.enum(['direct_resolution', 'escalated', 'evidence_requested', 'mediating']),
 });
 
+function evidenceItems(urls: string[] | undefined, by: 'buyer' | 'seller') {
+  const at = new Date().toISOString();
+  return (urls ?? []).map((url) => ({ url, by, at }));
+}
+
 const IdParams = z.object({ id: z.string().min(1).max(64) });
 const TokenParams = z.object({ token: z.string().min(8).max(128) });
 
@@ -114,7 +119,7 @@ const disputesRoute: FastifyPluginAsync = async (app) => {
             reason: body.reason,
             summary: body.summary,
             openedBy: body.openedBy,
-            returnEvidence: body.evidence ?? [],
+            evidence: evidenceItems(body.evidence, body.openedBy),
           },
         });
       });
@@ -170,15 +175,21 @@ const disputesRoute: FastifyPluginAsync = async (app) => {
     if (!isSeller) throw new Forbidden('Only the seller can respond to a dispute');
     if (dispute.status === 'resolved') throw new Conflict('This dispute is closed');
 
-    await prisma.disputeMessage.create({
-      data: { disputeId: dispute.id, authorId: request.user!.sub, content: body.message },
-    });
-    if (body.evidence?.length) {
-      await prisma.dispute.update({
+    const existing = Array.isArray(dispute.evidence) ? dispute.evidence : [];
+    await prisma.$transaction([
+      prisma.disputeMessage.create({
+        data: { disputeId: dispute.id, authorId: request.user!.sub, content: body.message },
+      }),
+      prisma.dispute.update({
         where: { id: dispute.id },
-        data: { returnEvidence: body.evidence, status: 'escalated' },
-      });
-    }
+        data: {
+          sellerResponse: body.message,
+          // Append — never overwrite the buyer's evidence.
+          evidence: [...existing, ...evidenceItems(body.evidence, 'seller')],
+          ...(body.evidence?.length && { status: 'escalated' }),
+        },
+      }),
+    ]);
 
     const updated = await prisma.dispute.findUniqueOrThrow({ where: { id: dispute.id }, include: { order: true } });
     return { order: normalizeOrder(updated.order), dispute: normalizeDispute(updated) };

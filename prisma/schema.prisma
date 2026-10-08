@@ -209,6 +209,9 @@ model Dispute {
 
   isReturn       Boolean @default(false)
   returnEvidence Json?
+  // [{ url, by: 'buyer' | 'seller', at }] — appended by each party.
+  evidence       Json    @default("[]")
+  sellerResponse String?
 
   resolution Json?
 

@@ -25,6 +25,10 @@ WHERE "buyerToken" IS NULL;
 
 ALTER TABLE "Order" ALTER COLUMN "buyerToken" SET NOT NULL;
 
+-- AlterTable: dispute evidence from both parties + the seller's reply.
+ALTER TABLE "Dispute" ADD COLUMN     "evidence" JSONB NOT NULL DEFAULT '[]',
+ADD COLUMN     "sellerResponse" TEXT;
+
 -- CreateTable
 CREATE TABLE "Payout" (
     "id" TEXT NOT NULL,

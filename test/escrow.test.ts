@@ -152,6 +152,26 @@ describe('disputes', () => {
     ]);
   });
 
+  it("keeps both parties' evidence and the seller's reply", async () => {
+    const { listing, token } = await createSellerWithListing();
+    const order = await placeFundedOrder(listing.id);
+
+    const opened = await api('POST', `/api/orders/${order.buyerToken}/dispute`, {
+      body: { reason: 'Wrong colour', openedBy: 'buyer', evidence: ['https://example.com/buyer.jpg'] },
+    });
+    const responded = await api('POST', `/api/disputes/${opened.body.dispute.id}/respond`, {
+      token,
+      body: { stance: 'counter', message: 'Colour matches the photos', evidence: ['https://example.com/seller.jpg'] },
+    });
+
+    expect(responded.status).toBe(200);
+    expect(responded.body.dispute.sellerResponse).toBe('Colour matches the photos');
+    expect(responded.body.dispute.evidence.map((e: { url: string; by: string }) => [e.by, e.url])).toEqual([
+      ['buyer', 'https://example.com/buyer.jpg'],
+      ['seller', 'https://example.com/seller.jpg'],
+    ]);
+  });
+
   it('keeps mediator routes closed to normal users', async () => {
     const { token } = await createSellerWithListing();
     expect((await api('GET', '/api/admin/disputes', { token })).status).toBe(403);
