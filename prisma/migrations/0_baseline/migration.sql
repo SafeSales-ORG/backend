@@ -1,8 +1,14 @@
+-- CreateSchema
+CREATE SCHEMA IF NOT EXISTS "public";
+
 -- CreateEnum
-CREATE TYPE "EscrowStatus" AS ENUM ('pending_payment', 'funded', 'shipped', 'delivered', 'completed', 'disputed', 'refunded');
+CREATE TYPE "EscrowStatus" AS ENUM ('pending_payment', 'funded', 'shipped', 'delivered', 'released', 'disputed', 'refunded');
 
 -- CreateEnum
 CREATE TYPE "DisputeStatus" AS ENUM ('direct_resolution', 'escalated', 'evidence_requested', 'mediating', 'resolved');
+
+-- CreateEnum
+CREATE TYPE "UserRole" AS ENUM ('USER', 'MEDIATOR', 'ADMIN');
 
 -- CreateEnum
 CREATE TYPE "AuthProvider" AS ENUM ('EMAIL', 'GOOGLE', 'FACEBOOK');
@@ -14,6 +20,7 @@ CREATE TABLE "User" (
     "passwordHash" TEXT,
     "googleId" TEXT,
     "facebookId" TEXT,
+    "role" "UserRole" NOT NULL DEFAULT 'USER',
     "authProvider" "AuthProvider" NOT NULL,
     "emailVerified" BOOLEAN NOT NULL DEFAULT false,
     "nostrNsec" TEXT,
@@ -31,17 +38,13 @@ CREATE TABLE "Seller" (
     "npub" TEXT NOT NULL,
     "handle" TEXT NOT NULL,
     "name" TEXT NOT NULL,
-    "location" TEXT NOT NULL,
-    "phone" TEXT NOT NULL,
-    "category" TEXT NOT NULL,
+    "avatar" TEXT,
     "bio" TEXT,
-    "bankName" TEXT,
+    "delivery" TEXT,
     "bankCode" TEXT NOT NULL,
-    "bankAccount" TEXT,
-    "bankHolder" TEXT,
-    "bankVerifiedName" TEXT,
-    "bankVerifiedAt" TIMESTAMP(3),
-    "lnAddress" TEXT,
+    "bankName" TEXT,
+    "bankAccountNumber" TEXT NOT NULL,
+    "bankAccountName" TEXT,
     "verified" BOOLEAN NOT NULL DEFAULT false,
     "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
     "updatedAt" TIMESTAMP(3) NOT NULL,
@@ -61,8 +64,8 @@ CREATE TABLE "Listing" (
     "variants" JSONB,
     "inStock" INTEGER NOT NULL DEFAULT 1,
     "delivery" TEXT,
+    "deliveryFee" INTEGER,
     "active" BOOLEAN NOT NULL DEFAULT true,
-    "nostrEventId" TEXT,
     "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
     "updatedAt" TIMESTAMP(3) NOT NULL,
 
@@ -76,24 +79,23 @@ CREATE TABLE "Order" (
     "orderToken" TEXT NOT NULL,
     "listingId" TEXT NOT NULL,
     "sellerId" TEXT NOT NULL,
-    "buyerNpub" TEXT NOT NULL,
-    "buyerPubkey" TEXT NOT NULL,
+    "buyerId" TEXT,
     "buyerName" TEXT NOT NULL,
-    "buyerPhone" TEXT NOT NULL,
+    "buyerPhone" TEXT,
     "buyerEmail" TEXT,
-    "buyerCity" TEXT NOT NULL,
-    "buyerAddress" TEXT,
-    "contactMethod" TEXT,
+    "deliveryAddress" TEXT,
+    "quantity" INTEGER NOT NULL DEFAULT 1,
     "variant" TEXT,
-    "amountNGN" INTEGER NOT NULL,
+    "priceNGN" INTEGER NOT NULL,
     "status" "EscrowStatus" NOT NULL DEFAULT 'pending_payment',
-    "nombaAccountNo" TEXT,
-    "nombaAccountName" TEXT,
-    "nombaBankName" TEXT,
+    "accountNumber" TEXT,
+    "accountName" TEXT,
+    "bankName" TEXT,
     "nombaReference" TEXT,
     "trackingNumber" TEXT,
     "carrier" TEXT,
     "shippedAt" TIMESTAMP(3),
+    "deliveredAt" TIMESTAMP(3),
     "releasedAt" TIMESTAMP(3),
     "refundedAt" TIMESTAMP(3),
     "autoReleaseAt" TIMESTAMP(3),
@@ -137,6 +139,17 @@ CREATE TABLE "Dispute" (
     CONSTRAINT "Dispute_pkey" PRIMARY KEY ("id")
 );
 
+-- CreateTable
+CREATE TABLE "DisputeMessage" (
+    "id" TEXT NOT NULL,
+    "disputeId" TEXT NOT NULL,
+    "authorId" TEXT NOT NULL,
+    "content" TEXT NOT NULL,
+    "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+
+    CONSTRAINT "DisputeMessage_pkey" PRIMARY KEY ("id")
+);
+
 -- CreateIndex
 CREATE UNIQUE INDEX "User_email_key" ON "User"("email");
 
@@ -174,9 +187,6 @@ CREATE UNIQUE INDEX "Order_orderToken_key" ON "Order"("orderToken");
 CREATE INDEX "Order_sellerId_idx" ON "Order"("sellerId");
 
 -- CreateIndex
-CREATE INDEX "Order_buyerPubkey_idx" ON "Order"("buyerPubkey");
-
--- CreateIndex
 CREATE INDEX "Order_status_idx" ON "Order"("status");
 
 -- CreateIndex
@@ -191,6 +201,12 @@ CREATE UNIQUE INDEX "Dispute_orderId_key" ON "Dispute"("orderId");
 -- CreateIndex
 CREATE INDEX "Dispute_status_idx" ON "Dispute"("status");
 
+-- CreateIndex
+CREATE INDEX "DisputeMessage_disputeId_idx" ON "DisputeMessage"("disputeId");
+
+-- CreateIndex
+CREATE INDEX "DisputeMessage_authorId_idx" ON "DisputeMessage"("authorId");
+
 -- AddForeignKey
 ALTER TABLE "Seller" ADD CONSTRAINT "Seller_userId_fkey" FOREIGN KEY ("userId") REFERENCES "User"("id") ON DELETE CASCADE ON UPDATE CASCADE;
 
@@ -204,4 +220,14 @@ ALTER TABLE "Order" ADD CONSTRAINT "Order_listingId_fkey" FOREIGN KEY ("listingI
 ALTER TABLE "Order" ADD CONSTRAINT "Order_sellerId_fkey" FOREIGN KEY ("sellerId") REFERENCES "Seller"("id") ON DELETE RESTRICT ON UPDATE CASCADE;
 
 -- AddForeignKey
+ALTER TABLE "Order" ADD CONSTRAINT "Order_buyerId_fkey" FOREIGN KEY ("buyerId") REFERENCES "User"("id") ON DELETE SET NULL ON UPDATE CASCADE;
+
+-- AddForeignKey
 ALTER TABLE "Dispute" ADD CONSTRAINT "Dispute_orderId_fkey" FOREIGN KEY ("orderId") REFERENCES "Order"("id") ON DELETE CASCADE ON UPDATE CASCADE;
+
+-- AddForeignKey
+ALTER TABLE "DisputeMessage" ADD CONSTRAINT "DisputeMessage_disputeId_fkey" FOREIGN KEY ("disputeId") REFERENCES "Dispute"("id") ON DELETE CASCADE ON UPDATE CASCADE;
+
+-- AddForeignKey
+ALTER TABLE "DisputeMessage" ADD CONSTRAINT "DisputeMessage_authorId_fkey" FOREIGN KEY ("authorId") REFERENCES "User"("id") ON DELETE RESTRICT ON UPDATE CASCADE;
+

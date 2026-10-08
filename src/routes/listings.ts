@@ -1,11 +1,15 @@
 import type { FastifyPluginAsync } from 'fastify';
 import { z } from 'zod';
 import { prisma } from '../db/client.js';
-import { BadRequest, NotFound } from '../lib/errors.js';
+import { BadRequest, Forbidden, NotFound } from '../lib/errors.js';
 import { requireAuth } from '../middleware/auth.js';
+import { normalizeListing, normalizeSeller } from '../lib/normalize.js';
+
+// Images are compressed client-side to data: URLs (or are https URLs).
+const ImageUrl = z.string().max(1_500_000).regex(/^(https:\/\/|data:image\/)/, 'Image must be an https or data:image URL');
 
 const ImageSchema = z.object({
-  url: z.string().url().optional(),
+  url: ImageUrl.optional(),
   seed: z.string().optional(),
   alt: z.string().max(200).optional(),
 }).refine((v) => v.url || v.seed, 'Image must have a url or a seed');
@@ -36,8 +40,7 @@ const UpdateListingSchema = z.object({
 });
 
 const ListingsQuerySchema = z.object({
-  seller: z.string().regex(/^npub1[0-9a-z]+$/).optional(),
-  active: z.enum(['true', 'false']).optional(),
+  seller: z.string().min(1).max(128).optional(),
 });
 
 const listingsRoute: FastifyPluginAsync = async (app) => {
@@ -65,7 +68,7 @@ const listingsRoute: FastifyPluginAsync = async (app) => {
     });
 
     reply.code(201);
-    return { listing };
+    return { listing: normalizeListing(listing) };
   });
 
   app.get<{ Params: { id: string } }>('/api/listings/:id', async (request) => {
@@ -73,9 +76,9 @@ const listingsRoute: FastifyPluginAsync = async (app) => {
       where: { id: request.params.id },
       include: { seller: true },
     });
-    if (!listing) throw new NotFound(`Listing ${request.params.id} not found`);
+    if (!listing || !listing.active) throw new NotFound('Listing not found');
 
-    return { listing, seller: listing.seller };
+    return { listing: normalizeListing(listing), seller: normalizeSeller(listing.seller) };
   });
 
   app.patch<{ Params: { id: string } }>(
@@ -89,7 +92,7 @@ const listingsRoute: FastifyPluginAsync = async (app) => {
 
       const seller = await prisma.seller.findUnique({ where: { userId: request.user!.sub } });
       if (!seller || listing.sellerId !== seller.id) {
-        throw new BadRequest('You are not the owner of this listing');
+        throw new Forbidden('You are not the owner of this listing');
       }
 
       const updated = await prisma.listing.update({
@@ -97,7 +100,7 @@ const listingsRoute: FastifyPluginAsync = async (app) => {
         data: body,
       });
 
-      return { listing: updated };
+      return { listing: normalizeListing(updated) };
     },
   );
 
@@ -110,7 +113,7 @@ const listingsRoute: FastifyPluginAsync = async (app) => {
 
       const seller = await prisma.seller.findUnique({ where: { userId: request.user!.sub } });
       if (!seller || listing.sellerId !== seller.id) {
-        throw new BadRequest('You are not the owner of this listing');
+        throw new Forbidden('You are not the owner of this listing');
       }
 
       await prisma.listing.update({
@@ -132,15 +135,13 @@ const listingsRoute: FastifyPluginAsync = async (app) => {
     const seller = await prisma.seller.findUnique({ where: { npub: query.seller } });
     if (!seller) throw new NotFound('Seller not found');
 
+    // Public view: only the shop's active listings.
     const listings = await prisma.listing.findMany({
-      where: {
-        sellerId: seller.id,
-        ...(query.active !== undefined && { active: query.active === 'true' }),
-      },
+      where: { sellerId: seller.id, active: true },
       orderBy: { createdAt: 'desc' },
     });
 
-    return { listings };
+    return { listings: listings.map(normalizeListing), seller: normalizeSeller(seller) };
   });
 };
 

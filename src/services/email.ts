@@ -8,7 +8,7 @@ interface BuyerOrderEmailInput {
   order: {
     id: string;
     shortId: string;
-    orderToken: string;
+    buyerToken: string;
     buyerEmail: string | null;
     buyerName: string;
     priceNGN: number;
@@ -35,8 +35,8 @@ function formatNGN(amount: number): string {
   }).format(amount);
 }
 
-function buildOrderLink(orderToken: string): string {
-  return `${env.FRONTEND_APP_URL}/order/${encodeURIComponent(orderToken)}`;
+function buildOrderLink(buyerToken: string): string {
+  return `${env.FRONTEND_APP_URL}/order/${encodeURIComponent(buyerToken)}`;
 }
 
 function usesResendTestSender(): boolean {
@@ -78,7 +78,7 @@ export async function sendBuyerOrderLinkEmail({
     return;
   }
 
-  const orderLink = buildOrderLink(order.orderToken);
+  const orderLink = buildOrderLink(order.buyerToken);
   const safeName = escapeHtml(order.buyerName);
   const safeTitle = escapeHtml(listing.title);
   const safeShortId = escapeHtml(order.shortId);
@@ -137,12 +137,7 @@ export async function sendBuyerOrderLinkEmail({
   }
 
   logger.info(
-    {
-      orderId: order.id,
-      buyerEmail: order.buyerEmail,
-      recipient,
-      redirectedForResendTest: recipient !== order.buyerEmail,
-    },
+    { orderId: order.id, redirectedForResendTest: recipient !== order.buyerEmail },
     'Buyer order link email sent',
   );
 }
