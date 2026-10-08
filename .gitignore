@@ -1,14 +1,21 @@
 # Dependencies
 node_modules
 
-# Environment variables (never commit real secrets)
+# Environment variables — never commit real secrets.
+# Only .env.example (placeholders) is tracked.
 .env
-.env.local
-.env.*.local
+.env.*
+!.env.example
+
+# Keys and certificates
+*.pem
+*.key
+*.p12
+*.crt
 
 # Build output
 dist
-.tsbuildinfo
+*.tsbuildinfo
 
 # Prisma generated client (regenerated on install)
 src/generated
@@ -19,12 +26,12 @@ npm-debug.log*
 yarn-debug.log*
 pnpm-debug.log*
 
-# Editor
+# Editor / OS
 .vscode/*
 !.vscode/extensions.json
 .idea
 .DS_Store
 
-# Runtime
+# Runtime / tests
 .cache
 coverage
