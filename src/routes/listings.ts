@@ -41,6 +41,7 @@ const UpdateListingSchema = z.object({
 
 const ListingsQuerySchema = z.object({
   seller: z.string().min(1).max(128).optional(),
+  limit: z.coerce.number().int().min(1).max(100).default(60),
 });
 
 const listingsRoute: FastifyPluginAsync = async (app) => {
@@ -139,8 +140,18 @@ const listingsRoute: FastifyPluginAsync = async (app) => {
   app.get('/api/listings', async (request) => {
     const query = ListingsQuerySchema.parse(request.query);
 
+    // No seller: the public marketplace feed — newest active, in-stock
+    // listings across all shops, each with its shop's public profile.
     if (!query.seller) {
-      throw new BadRequest('?seller=<npub> query parameter is required');
+      const listings = await prisma.listing.findMany({
+        where: { active: true, inStock: { gt: 0 } },
+        include: { seller: true },
+        orderBy: { createdAt: 'desc' },
+        take: query.limit,
+      });
+      return {
+        listings: listings.map((l) => ({ ...normalizeListing(l), seller: normalizeSeller(l.seller) })),
+      };
     }
 
     const seller = await prisma.seller.findUnique({ where: { npub: query.seller } });

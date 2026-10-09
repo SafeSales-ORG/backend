@@ -64,6 +64,21 @@ describe('listings', () => {
   });
 });
 
+describe('marketplace', () => {
+  it('lists active in-stock listings across shops with public seller info only', async () => {
+    const a = await createSellerWithListing();
+    const b = await createSellerWithListing({ inStock: 0 });
+    const res = await api('GET', '/api/listings?limit=100');
+    expect(res.status).toBe(200);
+    const ids = res.body.listings.map((l: { id: string }) => l.id);
+    expect(ids).toContain(a.listing.id);
+    expect(ids).not.toContain(b.listing.id); // sold out
+    const mine = res.body.listings.find((l: { id: string }) => l.id === a.listing.id);
+    expect(mine.seller.handle).toBe(a.seller.handle);
+    expect(JSON.stringify(res.body)).not.toContain('0123456789');
+  });
+});
+
 describe('seller profile', () => {
   it('returns the payout account to its owner with the number masked', async () => {
     const { token } = await createSellerWithListing();
