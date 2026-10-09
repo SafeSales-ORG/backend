@@ -1,4 +1,4 @@
-import type { FastifyPluginAsync } from 'fastify';
+import type { FastifyPluginAsync, FastifyReply, FastifyRequest } from 'fastify';
 import { z } from 'zod';
 import { imageUrl } from '../lib/images.js';
 import { prisma } from '../db/client.js';
@@ -6,6 +6,7 @@ import { Conflict, Forbidden, NotFound, Unauthorized, isUniqueViolation } from '
 import { optionalAuth, requireAuth, requireMediator } from '../middleware/auth.js';
 import { normalizeOrder, normalizeSeller, normalizeListing, normalizeDispute } from '../lib/normalize.js';
 import { resolveDispute } from '../services/escrow.js';
+import { partyFor, partyNames, postToThread, recordDecision, threadMessage, waitingOn } from '../services/disputeThread.js';
 
 // Evidence images arrive as compressed data: URLs or https URLs.
 const Evidence = z.array(imageUrl(1_500_000)).max(6);
@@ -19,6 +20,9 @@ const OpenDisputeSchema = z.object({
 
 const AddMessageSchema = z.object({
   content: z.string().trim().min(1).max(2000),
+  attachments: z.array(imageUrl(1_500_000)).max(4).optional(),
+  // Mediator only: ask a party for information.
+  requestFrom: z.enum(['buyer', 'seller', 'both']).optional(),
 });
 
 const RespondSchema = z.object({
@@ -68,13 +72,22 @@ async function loadDisputeForUser(disputeId: string, userId: string, role?: stri
 
 async function mediatorDisputeList() {
   const disputes = await prisma.dispute.findMany({
-    include: { order: { include: { listing: true, seller: true } } },
+    include: {
+      order: { include: { listing: true, seller: true } },
+      messages: { orderBy: { createdAt: 'asc' }, select: { authorRole: true, requestFrom: true, createdAt: true } },
+    },
     orderBy: { createdAt: 'desc' },
     take: 500,
   });
   return {
     disputes: disputes.map((d) => ({
       ...normalizeDispute(d),
+      thread: {
+        count: d.messages.filter((m) => m.authorRole !== 'system').length,
+        lastAt: d.messages.at(-1)?.createdAt.toISOString() ?? null,
+        lastFrom: d.messages.at(-1)?.authorRole ?? null,
+        waitingOn: waitingOn(d.status, d.messages),
+      },
       order: { ...normalizeOrder(d.order), listing: normalizeListing(d.order.listing) },
       seller: normalizeSeller(d.order.seller),
       listing: normalizeListing(d.order.listing),
@@ -112,7 +125,7 @@ const disputesRoute: FastifyPluginAsync = async (app) => {
         });
         if (claimed.count === 0) throw new Conflict(`Order can't be disputed while it is ${order.status}`);
 
-        return tx.dispute.create({
+        const created = await tx.dispute.create({
           data: {
             orderId: order.id,
             reason: body.reason,
@@ -121,6 +134,24 @@ const disputesRoute: FastifyPluginAsync = async (app) => {
             evidence: evidenceItems(body.evidence, body.openedBy),
           },
         });
+        const naira = `₦${order.priceNGN.toLocaleString('en-NG')}`;
+        await tx.disputeMessage.create({
+          data: {
+            disputeId: created.id,
+            authorRole: 'system',
+            content: `The ${body.openedBy} reported a problem. ${naira} stays held by SafeSale until a mediator decides. Everyone in this case can see these messages.`,
+          },
+        });
+        await tx.disputeMessage.create({
+          data: {
+            disputeId: created.id,
+            authorId: request.user?.sub ?? null,
+            authorRole: body.openedBy,
+            content: body.summary ? `${body.reason}\n\n${body.summary}` : body.reason,
+            attachments: body.evidence ?? [],
+          },
+        });
+        return created;
       });
     } catch (err) {
       if (isUniqueViolation(err)) throw new Conflict('A dispute already exists for this order');
@@ -136,35 +167,47 @@ const disputesRoute: FastifyPluginAsync = async (app) => {
 
   app.get('/api/disputes/:id', { preHandler: [requireAuth] }, async (request) => {
     const { id } = IdParams.parse(request.params);
-    await loadDisputeForUser(id, request.user!.sub, request.user!.role);
-    const dispute = await prisma.dispute.findUniqueOrThrow({
-      where: { id },
-      include: { messages: { orderBy: { createdAt: 'asc' } } },
-    });
+    const { dispute } = await loadDisputeForUser(id, request.user!.sub, request.user!.role);
+    const messages = await prisma.disputeMessage.findMany({ where: { disputeId: id }, orderBy: { createdAt: 'asc' } });
+    const names = partyNames(dispute);
+    return { dispute: { ...normalizeDispute(dispute), messages: messages.map((m) => threadMessage(m, names)) } };
+  });
+
+  /**
+   * The case thread. Buyer (order link token), seller and mediator all read
+   * and write the same conversation while the money stays in escrow.
+   */
+  app.get('/api/disputes/:id/thread', async (request) => {
+    const { id } = IdParams.parse(request.params);
+    const { dispute, party } = await partyFor(request, id);
+    const messages = await prisma.disputeMessage.findMany({ where: { disputeId: id }, orderBy: { createdAt: 'asc' } });
+    const names = partyNames(dispute);
     return {
-      dispute: {
-        ...normalizeDispute(dispute),
-        messages: dispute.messages.map((m) => ({
-          id: m.id,
-          authorId: m.authorId,
-          content: m.content,
-          createdAt: m.createdAt.toISOString(),
-        })),
-      },
+      viewer: party,
+      dispute: normalizeDispute(dispute),
+      waitingOn: waitingOn(dispute.status, messages),
+      messages: messages.map((m) => threadMessage(m, names)),
     };
   });
 
-  app.post('/api/disputes/:id/messages', { preHandler: [requireAuth] }, async (request) => {
+  const postMessage = async (request: FastifyRequest, reply: FastifyReply) => {
     const { id } = IdParams.parse(request.params);
     const body = AddMessageSchema.parse(request.body);
-    const { dispute } = await loadDisputeForUser(id, request.user!.sub, request.user!.role);
-    if (dispute.status === 'resolved') throw new Conflict('This dispute is closed');
-
-    const message = await prisma.disputeMessage.create({
-      data: { disputeId: dispute.id, authorId: request.user!.sub, content: body.content },
+    const { dispute, party, userId } = await partyFor(request, id);
+    const message = await postToThread({
+      dispute,
+      party,
+      userId,
+      content: body.content,
+      attachments: body.attachments ?? [],
+      requestFrom: body.requestFrom,
     });
-    return { message: { id: message.id, content: message.content, createdAt: message.createdAt.toISOString() } };
-  });
+    reply.code(201);
+    return { message: threadMessage(message, partyNames(dispute)) };
+  };
+  const messageLimit = { config: { rateLimit: { max: 20, timeWindow: '1 minute' } } };
+  app.post('/api/disputes/:id/thread', messageLimit, postMessage);
+  app.post('/api/disputes/:id/messages', messageLimit, postMessage);
 
   /** Seller responds to a dispute. */
   app.post('/api/disputes/:id/respond', { preHandler: [requireAuth] }, async (request) => {
@@ -177,7 +220,13 @@ const disputesRoute: FastifyPluginAsync = async (app) => {
     const existing = Array.isArray(dispute.evidence) ? dispute.evidence : [];
     await prisma.$transaction([
       prisma.disputeMessage.create({
-        data: { disputeId: dispute.id, authorId: request.user!.sub, content: body.message },
+        data: {
+          disputeId: dispute.id,
+          authorId: request.user!.sub,
+          authorRole: 'seller',
+          content: body.message,
+          attachments: body.evidence ?? [],
+        },
       }),
       prisma.dispute.update({
         where: { id: dispute.id },
@@ -222,7 +271,16 @@ const disputesRoute: FastifyPluginAsync = async (app) => {
     });
 
     const dispute = await prisma.dispute.findUniqueOrThrow({ where: { id }, include: { order: true } });
-    return { order: normalizeOrder(dispute.order), dispute: normalizeDispute(dispute) };
+    const settled = (dispute.resolution ?? {}) as { buyerRefundNGN?: number; sellerReleaseNGN?: number };
+    await recordDecision({
+      disputeId: id,
+      userId: request.user!.sub,
+      outcome: body.outcome,
+      buyerRefundNGN: settled.buyerRefundNGN ?? 0,
+      sellerReleaseNGN: settled.sellerReleaseNGN ?? 0,
+      rationale: body.rationale,
+    });
+    return { order: normalizeOrder({ ...dispute.order, dispute }), dispute: normalizeDispute(dispute) };
   });
 };
 

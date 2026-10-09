@@ -7,7 +7,21 @@ import type { Dispute, Listing, Order, Seller } from '@prisma/client';
 type PublicSellerInput = Pick<Seller, 'id' | 'npub' | 'handle' | 'name' | 'avatar' | 'bio' | 'verified' | 'createdAt'> &
   Partial<Pick<Seller, 'delivery'>>;
 
-export function normalizeOrder(order: Order) {
+/**
+ * How a disputed order's money was divided, once the mediator has decided.
+ * Null for orders that never went to a decision.
+ */
+export function settlementOf(dispute: Dispute | null | undefined) {
+  if (!dispute || dispute.status !== 'resolved' || !dispute.resolution) return null;
+  const r = dispute.resolution as { buyerRefundNGN?: number; sellerReleaseNGN?: number; outcome?: string };
+  return {
+    outcome: r.outcome ?? null,
+    buyerRefundNGN: r.buyerRefundNGN ?? 0,
+    sellerReleaseNGN: r.sellerReleaseNGN ?? 0,
+  };
+}
+
+export function normalizeOrder(order: Order & { dispute?: Dispute | null }) {
   return {
     id: order.id,
     shortId: order.shortId,
@@ -38,6 +52,7 @@ export function normalizeOrder(order: Order) {
     autoReleaseAt: iso(order.autoReleaseAt),
     createdAt: order.createdAt.toISOString(),
     updatedAt: order.updatedAt.toISOString(),
+    settlement: settlementOf(order.dispute),
   };
 }
 

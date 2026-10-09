@@ -125,6 +125,7 @@ Errors are always `{ "error": { "code", "message", "details?" } }`.
 | `POST /api/orders/:buyerToken/deliver` · `/release` | buyer | |
 | `POST /api/orders/:token/dispute` | buyer (buyerToken) or seller (orderToken + session) | |
 | `GET /api/disputes/:id` · `POST …/messages` · `POST …/respond` | participants | |
+| `GET /api/disputes/:id/thread` · `POST /api/disputes/:id/thread` | buyer (`X-Buyer-Token`), seller, mediator | Case chat. The mediator can add `requestFrom: buyer \| seller \| both` to ask for information. |
 | `GET /api/admin/disputes` · `POST /api/admin/disputes/:id/resolve` | mediator | |
 | `POST /api/uploads` | seller, or buyer via `X-Buyer-Token` | image upload, returns `{ url }` |
 | `POST /api/dev/simulate-payment` | dev only | only exists when `PAYMENT_SIMULATION=true` and not production |

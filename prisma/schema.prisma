@@ -25,6 +25,13 @@ enum DisputeStatus {
   resolved
 }
 
+enum DisputeParty {
+  buyer
+  seller
+  mediator
+  system
+}
+
 enum UserRole {
   USER
   MEDIATOR
@@ -223,14 +230,21 @@ model Dispute {
   @@index([status])
 }
 
+// The case thread: buyer, seller and mediator all see every message.
 model DisputeMessage {
-  id        String   @id @default(cuid())
-  disputeId String
-  dispute   Dispute  @relation(fields: [disputeId], references: [id], onDelete: Cascade)
-  authorId  String
-  author    User     @relation(fields: [authorId], references: [id])
-  content   String
-  createdAt DateTime @default(now())
+  id          String       @id @default(cuid())
+  disputeId   String
+  dispute     Dispute      @relation(fields: [disputeId], references: [id], onDelete: Cascade)
+  // Null for buyers (they have no account) and system notes.
+  authorId    String?
+  author      User?        @relation(fields: [authorId], references: [id], onDelete: SetNull)
+  authorRole  DisputeParty
+  content     String
+  // Image URLs attached to this message.
+  attachments Json         @default("[]")
+  // Set when the mediator asks a party for information: buyer | seller | both.
+  requestFrom String?
+  createdAt   DateTime     @default(now())
 
   @@index([disputeId])
   @@index([authorId])
