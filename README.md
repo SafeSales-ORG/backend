@@ -93,6 +93,7 @@ Errors are always `{ "error": { "code", "message", "details?" } }`.
 | `POST /api/auth/register` · `/login` · `/google` | anyone | returns `{ token, user }` |
 | `GET /api/auth/me` | signed in | |
 | `POST /api/sellers` · `PUT /api/sellers` | signed in | bank account is verified with the provider |
+| `GET /api/sellers/me` | seller | own profile + payout account (number masked) |
 | `GET /api/sellers/:handle` | anyone | public profile |
 | `POST /api/listings` · `PATCH`/`DELETE /api/listings/:id` | seller (owner) | |
 | `GET /api/listings/mine` | seller | all of the caller's listings, including hidden ones |

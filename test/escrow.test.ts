@@ -64,6 +64,17 @@ describe('listings', () => {
   });
 });
 
+describe('seller profile', () => {
+  it('returns the payout account to its owner with the number masked', async () => {
+    const { token } = await createSellerWithListing();
+    const me = await api('GET', '/api/sellers/me', { token });
+    expect(me.status).toBe(200);
+    expect(me.body.payout).toMatchObject({ bankCode: '058', accountNumberLast4: '6789' });
+    expect(JSON.stringify(me.body)).not.toContain('0123456789');
+    expect((await api('GET', '/api/sellers/me')).status).toBe(401);
+  });
+});
+
 describe('escrow release', () => {
   it('does not let the seller release funds with the shared order reference', async () => {
     const { listing, token } = await createSellerWithListing();

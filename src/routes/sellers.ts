@@ -83,6 +83,21 @@ const sellersRoute: FastifyPluginAsync = async (app) => {
     return { seller: normalizeSeller(seller) };
   });
 
+  /** The signed-in seller's own profile, with their payout account (masked). */
+  app.get('/api/sellers/me', { preHandler: [requireAuth] }, async (request) => {
+    const seller = await prisma.seller.findUnique({ where: { userId: request.user!.sub } });
+    if (!seller) throw new NotFound('Seller profile not found');
+    return {
+      seller: normalizeSeller(seller),
+      payout: {
+        bankCode: seller.bankCode,
+        bankName: seller.bankName ?? null,
+        accountName: seller.bankAccountName ?? null,
+        accountNumberLast4: seller.bankAccountNumber.slice(-4),
+      },
+    };
+  });
+
   app.get('/api/sellers/:handle', async (request) => {
     const { handle } = request.params as { handle: string };
 
