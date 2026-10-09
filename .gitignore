@@ -35,3 +35,7 @@ pnpm-debug.log*
 # Runtime / tests
 .cache
 coverage
+
+# Local image uploads (STORAGE_PROVIDER=local)
+uploads/
+.test-uploads/

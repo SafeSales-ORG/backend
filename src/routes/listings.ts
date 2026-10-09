@@ -1,12 +1,13 @@
 import type { FastifyPluginAsync } from 'fastify';
 import { z } from 'zod';
+import { imageUrl } from '../lib/images.js';
 import { prisma } from '../db/client.js';
 import { BadRequest, Forbidden, NotFound } from '../lib/errors.js';
 import { requireAuth } from '../middleware/auth.js';
 import { normalizeListing, normalizeSeller } from '../lib/normalize.js';
 
 // Images are compressed client-side to data: URLs (or are https URLs).
-const ImageUrl = z.string().max(1_500_000).regex(/^(https:\/\/|data:image\/)/, 'Image must be an https or data:image URL');
+const ImageUrl = imageUrl(1_500_000);
 
 const ImageSchema = z.object({
   url: ImageUrl.optional(),

@@ -44,6 +44,7 @@ export default async function setup() {
   });
 
   return async () => {
+    fs.rmSync(path.resolve('.test-uploads'), { recursive: true, force: true });
     await pg.stop();
     fs.rmSync(dir, { recursive: true, force: true });
   };

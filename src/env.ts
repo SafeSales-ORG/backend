@@ -62,6 +62,23 @@ const EnvSchema = z
       .transform((v) => (v && v.length > 0 ? v : 'https://sandbox.nomba.com'))
       .pipe(z.string().url()),
 
+    // Image uploads. "none" keeps photos inline in the database (legacy).
+    STORAGE_PROVIDER: z.enum(['none', 'local', 's3']).default('none'),
+    STORAGE_LOCAL_DIR: z.string().default('./uploads'),
+    // Public base URL files are served from (bucket/CDN URL for s3).
+    STORAGE_PUBLIC_URL: optionalString.pipe(z.string().url().optional()),
+    // This API's public URL — used for local uploads.
+    PUBLIC_API_URL: z
+      .string()
+      .default('http://localhost:3000')
+      .transform((v) => v.replace(/\/+$/, '')),
+    UPLOAD_MAX_BYTES: z.coerce.number().int().positive().default(5 * 1024 * 1024),
+    S3_BUCKET: optionalString,
+    S3_REGION: z.string().default('auto'),
+    S3_ENDPOINT: optionalString.pipe(z.string().url().optional()),
+    S3_ACCESS_KEY_ID: optionalString,
+    S3_SECRET_ACCESS_KEY: optionalString,
+
     // Mediator. Login is disabled until MEDIATOR_PASSWORD is set.
     MEDIATOR_EMAIL: z.string().email().default('mediator@safesale.app'),
     MEDIATOR_PASSWORD: z
@@ -83,7 +100,15 @@ const EnvSchema = z
       .pipe(z.string().email().optional()),
   })
   .superRefine((e, ctx) => {
+    if (e.STORAGE_PROVIDER === 's3') {
+      for (const key of ['S3_BUCKET', 'S3_ACCESS_KEY_ID', 'S3_SECRET_ACCESS_KEY', 'STORAGE_PUBLIC_URL'] as const) {
+        if (!e[key]) ctx.addIssue({ code: 'custom', path: [key], message: 'Required when STORAGE_PROVIDER=s3' });
+      }
+    }
     if (e.NODE_ENV !== 'production') return;
+    if (e.STORAGE_PROVIDER === 'local') {
+      ctx.addIssue({ code: 'custom', path: ['STORAGE_PROVIDER'], message: 'Local disk storage is lost on redeploy; use s3 in production' });
+    }
     if (e.JWT_SECRET.length < 32) {
       ctx.addIssue({ code: 'custom', path: ['JWT_SECRET'], message: 'Must be at least 32 characters in production' });
     }

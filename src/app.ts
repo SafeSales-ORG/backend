@@ -13,6 +13,9 @@ import ordersRoutes from './routes/orders.js';
 import nombaRoutes from './routes/nomba.js';
 import devRoutes from './routes/dev.js';
 import disputesRoutes from './routes/disputes.js';
+import uploadsRoutes from './routes/uploads.js';
+import fastifyStatic from '@fastify/static';
+import path from 'node:path';
 
 // Listing images and dispute evidence are sent inline as compressed data URLs.
 const BODY_LIMIT_BYTES = 10 * 1024 * 1024;
@@ -82,6 +85,18 @@ export async function buildApp(): Promise<FastifyInstance> {
   await app.register(nombaRoutes);
   await app.register(devRoutes);
   await app.register(disputesRoutes);
+  await app.register(uploadsRoutes);
+
+  // Local storage only (development): serve uploaded files.
+  if (env.STORAGE_PROVIDER === 'local') {
+    await app.register(fastifyStatic, {
+      root: path.resolve(env.STORAGE_LOCAL_DIR),
+      prefix: '/uploads/',
+      decorateReply: false,
+      immutable: true,
+      maxAge: '1y',
+    });
+  }
 
   app.get('/health', async () => ({ status: 'ok', timestamp: new Date().toISOString() }));
 

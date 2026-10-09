@@ -20,6 +20,8 @@ export default defineConfig({
       GOOGLE_CLIENT_ID: 'safesale-test-client.apps.googleusercontent.com',
       FRONTEND_ORIGINS: 'http://localhost:8080',
       AUTH_RATE_LIMIT_PER_MIN: '1000',
+      STORAGE_PROVIDER: 'local',
+      STORAGE_LOCAL_DIR: './.test-uploads',
     },
   },
 });

@@ -73,6 +73,25 @@ To add OPay: implement `PaymentProvider` in `payments/opay.ts`, add it to
 `payments/index.ts`, and add its webhook route (verify the signature, then
 call `markFunded` from `services/escrow.ts`).
 
+## Image uploads
+
+`POST /api/uploads` with `{ "dataUrl": "data:image/…;base64,…" }` returns
+`{ url }`. Allowed: a signed-in user, or a buyer sending their order's
+`X-Buyer-Token` (paid orders only — for dispute evidence). The server checks
+the actual bytes (JPEG, PNG or WebP only — no SVG), enforces
+`UPLOAD_MAX_BYTES`, and stores the file under a random key.
+
+Storage is set by `STORAGE_PROVIDER`:
+
+- `none` (default) — uploads return 503 and the frontend keeps photos inline
+  in the database, as before.
+- `local` — files saved to `STORAGE_LOCAL_DIR`, served at `/uploads`.
+  Development only (refused in production: disk is wiped on redeploy).
+- `s3` — any S3-compatible bucket (Cloudflare R2, AWS S3, DigitalOcean
+  Spaces, Supabase Storage, Backblaze B2). Set `S3_*` and
+  `STORAGE_PUBLIC_URL` (the public bucket/CDN URL). Add a bucket lifecycle
+  rule if you want to expire unused uploads.
+
 ## Auth
 
 - Email/password → JWT (HS256, `JWT_SECRET`). Login and sign-up are rate
@@ -107,6 +126,7 @@ Errors are always `{ "error": { "code", "message", "details?" } }`.
 | `POST /api/orders/:token/dispute` | buyer (buyerToken) or seller (orderToken + session) | |
 | `GET /api/disputes/:id` · `POST …/messages` · `POST …/respond` | participants | |
 | `GET /api/admin/disputes` · `POST /api/admin/disputes/:id/resolve` | mediator | |
+| `POST /api/uploads` | seller, or buyer via `X-Buyer-Token` | image upload, returns `{ url }` |
 | `POST /api/dev/simulate-payment` | dev only | only exists when `PAYMENT_SIMULATION=true` and not production |
 
 ## Database migrations

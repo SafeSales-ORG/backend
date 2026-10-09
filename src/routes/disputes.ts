@@ -1,5 +1,6 @@
 import type { FastifyPluginAsync } from 'fastify';
 import { z } from 'zod';
+import { imageUrl } from '../lib/images.js';
 import { prisma } from '../db/client.js';
 import { Conflict, Forbidden, NotFound, Unauthorized, isUniqueViolation } from '../lib/errors.js';
 import { optionalAuth, requireAuth, requireMediator } from '../middleware/auth.js';
@@ -7,9 +8,7 @@ import { normalizeOrder, normalizeSeller, normalizeListing, normalizeDispute } f
 import { resolveDispute } from '../services/escrow.js';
 
 // Evidence images arrive as compressed data: URLs or https URLs.
-const Evidence = z
-  .array(z.string().max(1_500_000).regex(/^(https:\/\/|data:image\/)/))
-  .max(6);
+const Evidence = z.array(imageUrl(1_500_000)).max(6);
 
 const OpenDisputeSchema = z.object({
   reason: z.string().trim().min(1).max(2000),

@@ -1,12 +1,13 @@
 import type { FastifyPluginAsync } from 'fastify';
 import { z } from 'zod';
+import { imageUrl } from '../lib/images.js';
 import { prisma } from '../db/client.js';
 import { Conflict, NotFound } from '../lib/errors.js';
 import { requireAuth } from '../middleware/auth.js';
 import { payments } from '../services/payments/index.js';
 import { normalizeSeller } from '../lib/normalize.js';
 
-const AvatarUrl = z.string().max(500_000).regex(/^(https:\/\/|data:image\/)/);
+const AvatarUrl = imageUrl(500_000);
 
 const CreateSellerSchema = z.object({
   name: z.string().trim().min(2).max(140),
