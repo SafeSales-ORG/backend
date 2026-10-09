@@ -95,6 +95,7 @@ Errors are always `{ "error": { "code", "message", "details?" } }`.
 | `POST /api/sellers` · `PUT /api/sellers` | signed in | bank account is verified with the provider |
 | `GET /api/sellers/:handle` | anyone | public profile |
 | `POST /api/listings` · `PATCH`/`DELETE /api/listings/:id` | seller (owner) | |
+| `GET /api/listings/mine` | seller | all of the caller's listings, including hidden ones |
 | `GET /api/listings/:id` · `GET /api/listings?seller=` | anyone | active listings only |
 | `POST /api/orders` | anyone | returns `{ order, buyerToken, payment }` |
 | `GET /api/orders/:token` | buyer or seller token | |

@@ -47,6 +47,23 @@ describe('orders', () => {
   });
 });
 
+describe('listings', () => {
+  it("returns the seller's own listings, including hidden ones, only to that seller", async () => {
+    const { listing, token } = await createSellerWithListing();
+    await api('DELETE', `/api/listings/${listing.id}`, { token }); // hides it
+
+    const mine = await api('GET', '/api/listings/mine', { token });
+    expect(mine.status).toBe(200);
+    expect(mine.body.listings.map((l: { id: string; active: boolean }) => [l.id, l.active])).toEqual([[listing.id, false]]);
+    expect(JSON.stringify(mine.body)).not.toContain('0123456789');
+
+    expect((await api('GET', '/api/listings/mine')).status).toBe(401);
+    const other = await createSellerWithListing();
+    const theirs = await api('GET', '/api/listings/mine', { token: other.token });
+    expect(theirs.body.listings.map((l: { id: string }) => l.id)).toEqual([other.listing.id]);
+  });
+});
+
 describe('escrow release', () => {
   it('does not let the seller release funds with the shared order reference', async () => {
     const { listing, token } = await createSellerWithListing();

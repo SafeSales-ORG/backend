@@ -71,6 +71,17 @@ const listingsRoute: FastifyPluginAsync = async (app) => {
     return { listing: normalizeListing(listing) };
   });
 
+  /** The signed-in seller's own listings, including hidden/sold-out ones. */
+  app.get('/api/listings/mine', { preHandler: [requireAuth] }, async (request) => {
+    const seller = await prisma.seller.findUnique({ where: { userId: request.user!.sub } });
+    if (!seller) throw new NotFound('Seller profile not found');
+    const listings = await prisma.listing.findMany({
+      where: { sellerId: seller.id },
+      orderBy: { createdAt: 'desc' },
+    });
+    return { listings: listings.map(normalizeListing) };
+  });
+
   app.get<{ Params: { id: string } }>('/api/listings/:id', async (request) => {
     const listing = await prisma.listing.findUnique({
       where: { id: request.params.id },
