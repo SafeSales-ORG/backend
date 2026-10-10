@@ -127,6 +127,7 @@ Errors are always `{ "error": { "code", "message", "details?" } }`.
 | `GET /api/disputes/:id` · `POST …/messages` · `POST …/respond` | participants | |
 | `GET /api/disputes/:id/thread` · `POST /api/disputes/:id/thread` | buyer (`X-Buyer-Token`), seller, mediator | Case chat. The mediator can add `requestFrom: buyer \| seller \| both` to ask for information. |
 | `GET /api/admin/disputes` · `POST /api/admin/disputes/:id/resolve` | mediator | |
+| `GET /api/admin/overview` · `/orders` · `/sellers` · `/refunds` · `POST /api/admin/refunds/:id/mark-paid` | mediator | Admin console. Buyer refunds are paid by hand, then recorded with the transfer reference. |
 | `POST /api/uploads` | seller, or buyer via `X-Buyer-Token` | image upload, returns `{ url }` |
 | `POST /api/dev/simulate-payment` | dev only | only exists when `PAYMENT_SIMULATION=true` and not production |
 

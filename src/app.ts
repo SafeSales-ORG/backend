@@ -14,6 +14,7 @@ import nombaRoutes from './routes/nomba.js';
 import devRoutes from './routes/dev.js';
 import disputesRoutes from './routes/disputes.js';
 import uploadsRoutes from './routes/uploads.js';
+import adminRoutes from './routes/admin.js';
 import fastifyStatic from '@fastify/static';
 import path from 'node:path';
 
@@ -86,6 +87,7 @@ export async function buildApp(): Promise<FastifyInstance> {
   await app.register(devRoutes);
   await app.register(disputesRoutes);
   await app.register(uploadsRoutes);
+  await app.register(adminRoutes);
 
   // Local storage only (development): serve uploaded files.
   if (env.STORAGE_PROVIDER === 'local') {
