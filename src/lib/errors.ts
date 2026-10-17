@@ -1,3 +1,5 @@
+import { Prisma } from '@prisma/client';
+
 export type ErrorPayload = {
   code: string;
   message: string;
@@ -67,20 +69,7 @@ export class ServiceUnavailable extends HttpError {
   }
 }
 
-export function generateShortId(): string {
-  const alphabet = 'ABCDEFGHJKMNPQRSTUVWXYZ23456789';
-  let s = '';
-  for (let i = 0; i < 4; i++) {
-    s += alphabet[Math.floor(Math.random() * alphabet.length)];
-  }
-  return `SS-${s}`;
-}
-
-export function generateOrderToken(): string {
-  const alphabet = 'abcdefghijkmnpqrstuvwxyz23456789';
-  let s = '';
-  for (let i = 0; i < 22; i++) {
-    s += alphabet[Math.floor(Math.random() * alphabet.length)];
-  }
-  return s;
+/** True when a Prisma error is a unique-constraint violation. */
+export function isUniqueViolation(err: unknown): boolean {
+  return err instanceof Prisma.PrismaClientKnownRequestError && err.code === 'P2002';
 }

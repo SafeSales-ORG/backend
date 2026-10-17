@@ -1,286 +1,158 @@
-# SafeSale Backend
+# SafeSale — Backend
 
-> **Fastify REST API for SafeSale escrow — Nomba payments + PostgreSQL + Nostr.**  
-> DevCareer × Nomba Hackathon submission.
+Fastify + Prisma + PostgreSQL API for SafeSale, a Naira escrow service for
+social-commerce sellers. The buyer pays into an account issued for their
+order, the money is held, and it's released to the seller only when the
+buyer confirms, the inspection window passes, or a mediator decides.
 
----
+The frontend lives in the sibling `frontend` repo and talks to this API
+through `src/lib/api/http.ts`.
 
-## What This Is
-
-The backend is a **Fastify** HTTP server written in TypeScript. It handles:
-
-- **Authentication** (email/password JWT, Google OAuth)
-- **Seller onboarding** (profile creation + Nomba bank account lookup)
-- **Listings** (CRUD, stored in PostgreSQL)
-- **Orders** (escrow lifecycle — Nomba virtual accounts, state machine)
-- **Payments** (Nomba API: virtual accounts, bank transfers, webhook verification)
-- **Disputes** (tiered resolution with mediator role)
-- **Auto-release cron** (funds released 7 days after shipping if buyer doesn't act)
-
-The frontend repo (`../frontend`) talks to this API via `src/lib/api/http.ts`.
-
----
-
-## Quick Start
+## Quick start
 
 ```bash
 npm install
-cp .env.example .env     # fill in the values below
-npm run db:migrate       # create tables in your Postgres DB
-npm run dev              # starts on http://localhost:3000
+cp .env.example .env        # fill in DATABASE_URL and JWT_SECRET at minimum
+npx prisma migrate deploy   # create tables
+npm run dev                 # http://localhost:3000  (GET /health)
 ```
 
-### Health check
-
-```
-GET http://localhost:3000/health
-→ { "status": "ok", "timestamp": "..." }
-```
-
----
-
-## Environment Variables
-
-Copy `.env.example` to `.env` and fill in:
-
-| Variable | Required | Default | Description |
-|---|---|---|---|
-| `DATABASE_URL` | ✅ | — | `postgresql://user:pass@host:5432/db` |
-| `JWT_SECRET` | ✅ | — | Min 16 chars. Used to sign/verify JWTs. |
-| `JWT_EXPIRES_IN` | — | `7d` | JWT token lifetime |
-| `FRONTEND_ORIGINS` | — | `http://localhost:8080` | Allowed CORS origins (comma-separated) |
-| `FRONTEND_APP_URL` | — | `http://localhost:8080` | Used in email links |
-| `NOMBA_CLIENT_ID` | ✅ | — | Nomba API client ID |
-| `NOMBA_SECRET_KEY` | ✅ | — | Nomba API secret key |
-| `NOMBA_ACCOUNT_ID` | ✅ | — | Nomba merchant account ID |
-| `NOMBA_SIGNING_KEY` | ✅ | — | HMAC key for webhook signature verification |
-| `NOMBA_BASE_URL` | — | `https://sandbox.nomba.com` | Use `https://api.nomba.com` for production |
-| `NOMBA_MOCK` | — | `false` | `true` = return fake Nomba responses without API calls |
-| `NOMBA_SIMULATION` | — | `false` | `true` = enable `POST /api/dev/simulate-payment` |
-| `RESEND_API_KEY` | — | — | Resend API key for transactional email |
-| `RESEND_FROM_EMAIL` | — | `SafeSale <onboarding@resend.dev>` | Sender address |
-| `MEDIATOR_EMAIL` | — | `mediator@safesale.app` | Mediator login email |
-| `MEDIATOR_PASSWORD` | — | `mediator-dev-password` | Mediator login password (change in production!) |
-| `SAFESALE_NSEC` | — | — | Backend escrow Nostr private key (generated via `npm run keys:generate`) |
-| `GOOGLE_CLIENT_ID` | — | — | Google OAuth client ID (optional) |
-| `GOOGLE_CLIENT_SECRET` | — | — | Google OAuth client secret (optional) |
-
----
-
-## API Reference
-
-All endpoints return `Content-Type: application/json`. Errors follow the shape:
-
-```json
-{ "error": { "code": "ERROR_CODE", "message": "Human readable message" } }
-```
-
-### Auth
-
-| Method | Path | Auth | Body | Response |
-|---|---|---|---|---|
-| `POST` | `/api/auth/register` | Public | `{ email, password }` | `{ token, user }` |
-| `POST` | `/api/auth/login` | Public | `{ email, password }` | `{ token, user }` |
-| `POST` | `/api/auth/google` | Public | `{ email, googleId }` | `{ token, user }` |
-| `GET` | `/api/auth/me` | JWT | — | `{ user }` |
-| `POST` | `/api/auth/mediator/login` | Public | `{ email, password }` | `{ token, user }` |
-
-### Sellers
-
-| Method | Path | Auth | Description |
-|---|---|---|---|
-| `POST` | `/api/sellers` | JWT | Create seller profile (runs Nomba bank lookup) |
-| `GET` | `/api/sellers/:handle` | Public | Public seller profile by handle |
-| `PUT` | `/api/sellers` | JWT | Update seller profile (re-validates bank on change) |
-
-### Listings
-
-| Method | Path | Auth | Description |
-|---|---|---|---|
-| `POST` | `/api/listings` | JWT | Create a product listing |
-| `GET` | `/api/listings/:id` | Public | Get listing + seller info |
-| `PATCH` | `/api/listings/:id` | JWT | Update listing fields |
-| `DELETE` | `/api/listings/:id` | JWT | Soft-delete listing (`active = false`) |
-| `GET` | `/api/listings?seller=<npub>` | Public | All listings by seller npub |
-
-### Orders
-
-| Method | Path | Auth | Description |
-|---|---|---|---|
-| `POST` | `/api/orders` | Optional | Create order → returns Nomba virtual account details |
-| `GET` | `/api/orders/:token` | Public | Order + listing + seller + dispute |
-| `GET` | `/api/orders` | JWT | Seller's recent orders (last 7 days) |
-| `GET` | `/api/orders/seller/:npub` | Public | All orders for a seller |
-| `POST` | `/api/orders/:token/ship` | JWT | Mark shipped (requires `trackingNumber`) |
-| `POST` | `/api/orders/:token/deliver` | JWT | Mark delivered |
-| `POST` | `/api/orders/:token/release` | JWT | Release escrow → Nomba bank transfer to seller |
-
-### Disputes
-
-| Method | Path | Auth | Description |
-|---|---|---|---|
-| `POST` | `/api/orders/:token/dispute` | JWT | Open a dispute on an order |
-| `POST` | `/api/disputes` | JWT | Backend-native dispute creation |
-| `GET` | `/api/disputes/:id` | JWT | Get dispute + messages |
-| `POST` | `/api/disputes/:id/messages` | JWT | Add a message to a dispute |
-| `POST` | `/api/disputes/:id/respond` | JWT | Seller responds (with optional evidence) |
-| `GET` | `/api/admin/disputes` | Mediator | All disputes (mediator queue) |
-| `POST` | `/api/admin/disputes/:id/resolve` | Mediator | Resolve dispute (refund / release / split) |
-| `PATCH` | `/api/mediator/disputes/:id` | Mediator | Update dispute status/resolution |
-
-### Webhooks & Dev
-
-| Method | Path | Auth | Description |
-|---|---|---|---|
-| `POST` | `/api/webhooks/nomba` | HMAC | Nomba payment confirmation webhook |
-| `POST` | `/api/dev/simulate-payment` | Dev only | Simulate a Nomba payment (requires `NOMBA_SIMULATION=true`) |
-| `GET` | `/health` | Public | Health check |
-
----
-
-## Project Structure
-
-```
-backend/
-├── src/
-│   ├── index.ts              # Fastify app: CORS, route registration, error handler
-│   ├── env.ts                # Zod env schema — fails fast if any required var is missing
-│   │
-│   ├── db/
-│   │   └── client.ts         # Prisma client singleton
-│   │
-│   ├── middleware/
-│   │   └── auth.ts           # requireAuth / optionalAuth / requireMediator
-│   │                         # Verifies JWT, injects req.user
-│   │
-│   ├── routes/
-│   │   ├── auth.ts           # /api/auth/* — register, login, Google, mediator
-│   │   ├── sellers.ts        # /api/sellers/* — onboarding, profile, bank verification
-│   │   ├── listings.ts       # /api/listings/* — CRUD for product listings
-│   │   ├── orders.ts         # /api/orders/* — escrow lifecycle
-│   │   ├── disputes.ts       # /api/disputes/*, /api/orders/:token/dispute, /api/admin/disputes/*
-│   │   ├── nomba.ts          # /api/webhooks/nomba — payment webhook handler
-│   │   └── dev.ts            # /api/dev/simulate-payment — dev-only funding simulation
-│   │
-│   ├── services/
-│   │   ├── auth.ts           # register(), login(), findOrCreateGoogleUser()
-│   │   ├── nomba.ts          # Nomba API: virtual accounts, bank lookup, transfers, webhooks
-│   │   ├── email.ts          # Resend email templates (order confirmation, etc.)
-│   │   ├── nostr.ts          # Nostr keypair generation, relay event publishing
-│   │   └── scheduler.ts      # Auto-release cron — runs every 5 min
-│   │
-│   └── lib/
-│       ├── errors.ts         # HttpError, NotFound, BadRequest, Forbidden, Unauthorized, ServiceUnavailable
-│       ├── logger.ts         # Pino logger instance (JSON in production, pretty in dev)
-│       └── normalize.ts      # DB model → API response converters
-│
-├── prisma/
-│   ├── schema.prisma         # Database schema
-│   └── migrations/           # Migration history
-│
-└── scripts/
-    ├── generate-keys.ts      # Generate Nostr keypairs for backend identity
-    └── smoke-test.ts         # End-to-end API smoke test
-```
-
----
-
-## Database Schema
-
-```
-User ──────────── Seller
-                    ├── Listing[] ──── Order[]
-                    └── Order[] ────── Dispute
-                                         └── DisputeMessage[]
-WebhookEvent (standalone, idempotency store)
-```
-
-### Escrow Order States
-
-```
-pending_payment → funded → shipped → delivered → released
-                                ↘                ↗
-                               disputed → (mediator) → refunded
-```
-
----
-
-## Nomba Integration
-
-The `services/nomba.ts` module wraps the Nomba API:
-
-1. **Token management** — OAuth2 client credentials, auto-refreshed 5 min before expiry.
-2. **Virtual accounts** — `createVirtualAccount()` — called on every new order. Returns a unique account number, account name, and bank name that the buyer transfers to.
-3. **Bank lookup** — `bankAccountLookup()` — called on seller creation/update to verify and cache `bankAccountName`.
-4. **Bank transfer** — `transferToBank()` — called on escrow release. Sends NGN to the seller's registered bank account.
-5. **Webhook verification** — `verifyWebhookSignature()` — HMAC-SHA256 over a canonical payload string using `NOMBA_SIGNING_KEY`.
-
-### Development without Nomba
-
-Set `NOMBA_MOCK=true` in your `.env` to skip all real Nomba API calls. All functions return realistic fake data. The webhook simulation can then be triggered via `POST /api/dev/simulate-payment`.
-
----
-
-## Running in Production
-
-```bash
-# Build
-npm run build           # runs: prisma generate && tsc
-
-# Start (migrates DB, then starts server)
-npm start               # runs: prisma migrate deploy && node dist/src/index.js
-
-# Required env vars in production:
-# DATABASE_URL (Postgres connection string)
-# JWT_SECRET (strong random string, min 32 chars recommended)
-# NOMBA_CLIENT_ID, NOMBA_SECRET_KEY, NOMBA_ACCOUNT_ID, NOMBA_SIGNING_KEY
-# NOMBA_BASE_URL=https://api.nomba.com  (live, not sandbox)
-# FRONTEND_ORIGINS (your deployed frontend domain)
-# FRONTEND_APP_URL (your deployed frontend URL)
-# RESEND_API_KEY (for transactional emails)
-# MEDIATOR_EMAIL, MEDIATOR_PASSWORD (strong password in production!)
-```
-
-Recommended hosting: **Render** (Node.js service + managed PostgreSQL).
-
----
+With `PAYMENT_PROVIDER=mock` and `PAYMENT_SIMULATION=true` (the defaults in
+`.env.example`) the whole escrow flow works locally without a payment
+provider account.
 
 ## Scripts
 
-| Script | Description |
+| Command | What it does |
 |---|---|
-| `npm run dev` | Development server with hot reload (`tsx watch`) |
-| `npm run build` | Production build (Prisma generate + TypeScript compile) |
-| `npm start` | Production start (migrate + run) |
-| `npm run db:migrate` | Create and apply a new Prisma migration |
-| `npm run db:generate` | Regenerate Prisma client after schema changes |
-| `npm run db:studio` | Open Prisma Studio in browser |
-| `npm run db:deploy` | Apply pending migrations (used in production) |
-| `npm run keys:generate` | Generate Nostr keypairs for `SAFESALE_NSEC`/`MEDIATOR_NSEC` |
-| `npm run smoke` | Run end-to-end smoke tests against a running server |
-| `npm run typecheck` | TypeScript type check without emitting files |
+| `npm run dev` | Start with hot reload |
+| `npm test` | Integration tests against a throwaway Postgres (downloads it on first run) |
+| `npm run typecheck` | TypeScript check |
+| `npm run build` / `npm start` | Production build / run (start applies migrations first) |
+| `npm run db:migrate` | Create a new migration after editing `prisma/schema.prisma` |
 
----
+## How escrow works
 
-## Tech Stack
+```
+pending_payment ──payment webhook──▶ funded ──seller ships──▶ shipped ──buyer confirms──▶ delivered
+                                       │                        │                            │
+                                       └────────── buyer releases, or auto-release ──────────┴──▶ released
+                                       └────────── buyer/seller opens dispute ──▶ disputed ──mediator──▶ released | refunded
+```
 
-| Concern | Package | Version |
+- **Two tokens per order.** `orderToken` is the shared reference the seller
+  sees. `buyerToken` is the buyer's secret: it's in their order link and
+  email, and it's required to confirm delivery, release funds, or open a
+  dispute as the buyer. The seller never receives it.
+- **Auto-release.** Shipping sets `autoReleaseAt` to `AUTO_RELEASE_DAYS`
+  later. Opening a dispute clears it. A scheduler releases due orders every
+  5 minutes.
+- **Payouts are idempotent.** Every status change that moves money claims
+  the order with a conditional update and writes a `Payout` row (unique per
+  order and kind, with a fixed provider reference) in the same transaction,
+  before calling the provider. Payouts whose outcome is unknown are retried
+  with the same reference; rejected ones are marked `failed` for a human.
+- **Refunds** are recorded as `manual` payouts — we don't collect buyer bank
+  details yet, so a person pays them.
+- **Fee.** `PLATFORM_FEE_BPS` is deducted from the seller's payout.
+
+Code: `src/services/escrow.ts` (all money-moving transitions),
+`src/routes/orders.ts`, `src/routes/disputes.ts`.
+
+## Payment providers
+
+All provider calls go through the interface in
+`src/services/payments/types.ts` (create pay-in account, resolve bank
+account, transfer). Implementations:
+
+- `mock.ts` — local development, no network.
+- `nomba.ts` — Nomba. Webhook: `POST /api/webhooks/nomba`, verified with
+  `NOMBA_SIGNING_KEY` (webhooks are rejected if it isn't set).
+
+To add OPay: implement `PaymentProvider` in `payments/opay.ts`, add it to
+`payments/index.ts`, and add its webhook route (verify the signature, then
+call `markFunded` from `services/escrow.ts`).
+
+## Image uploads
+
+`POST /api/uploads` with `{ "dataUrl": "data:image/…;base64,…" }` returns
+`{ url }`. Allowed: a signed-in user, or a buyer sending their order's
+`X-Buyer-Token` (paid orders only — for dispute evidence). The server checks
+the actual bytes (JPEG, PNG or WebP only — no SVG), enforces
+`UPLOAD_MAX_BYTES`, and stores the file under a random key.
+
+Storage is set by `STORAGE_PROVIDER`:
+
+- `none` (default) — uploads return 503 and the frontend keeps photos inline
+  in the database, as before.
+- `local` — files saved to `STORAGE_LOCAL_DIR`, served at `/uploads`.
+  Development only (refused in production: disk is wiped on redeploy).
+- `s3` — any S3-compatible bucket (Cloudflare R2, AWS S3, DigitalOcean
+  Spaces, Supabase Storage, Backblaze B2). Set `S3_*` and
+  `STORAGE_PUBLIC_URL` (the public bucket/CDN URL). Add a bucket lifecycle
+  rule if you want to expire unused uploads.
+
+## Auth
+
+- Email/password → JWT (HS256, `JWT_SECRET`). Login and sign-up are rate
+  limited per IP.
+- Google: the frontend sends the Google **access token**; the backend asks
+  Google whether it was issued to `GOOGLE_CLIENT_ID` and only trusts a
+  verified email.
+- Mediator: sign in on the normal login form with `MEDIATOR_EMAIL` /
+  `MEDIATOR_PASSWORD`. The mediator gets a real user row with role
+  `MEDIATOR`.
+
+## API
+
+Errors are always `{ "error": { "code", "message", "details?" } }`.
+
+| Method & path | Who | Notes |
 |---|---|---|
-| HTTP framework | `fastify` | 5.x |
-| CORS | `@fastify/cors` | 10.x |
-| ORM | `@prisma/client` / `prisma` | 6.x |
-| Validation | `zod` | 3.x |
-| Auth | `jsonwebtoken` + `bcrypt` | 9.x / 5.x |
-| Logging | `pino` + `pino-pretty` | 9.x / 13.x |
-| Nostr | `nostr-tools` + `@nostrify/nostrify` | 2.x / 0.52.x |
-| TypeScript runner | `tsx` | 4.x |
-| OAuth | `passport` + `passport-google-oauth20` | 0.7.x / 2.x |
+| `POST /api/auth/register` · `/login` · `/google` | anyone | returns `{ token, user }` |
+| `GET /api/auth/me` | signed in | |
+| `POST /api/sellers` · `PUT /api/sellers` | signed in | bank account is verified with the provider |
+| `GET /api/sellers/me` | seller | own profile + payout account (number masked) |
+| `GET /api/sellers/:handle` | anyone | public profile |
+| `POST /api/listings` · `PATCH`/`DELETE /api/listings/:id` | seller (owner) | |
+| `GET /api/listings/mine` | seller | all of the caller's listings, including hidden ones |
+| `GET /api/listings` | anyone | marketplace feed: newest active, in-stock listings with public seller info (`?limit=`, max 100) |
+| `GET /api/listings/:id` · `GET /api/listings?seller=` | anyone | active listings only |
+| `POST /api/orders` | anyone | returns `{ order, buyerToken, payment }` |
+| `GET /api/orders/:token` | buyer or seller token | |
+| `GET /api/orders` · `GET /api/orders/seller/:npub` | seller (own shop) | |
+| `POST /api/orders/:orderToken/ship` | seller | starts the auto-release clock |
+| `POST /api/orders/:buyerToken/deliver` · `/release` | buyer | |
+| `POST /api/orders/:token/dispute` | buyer (buyerToken) or seller (orderToken + session) | |
+| `GET /api/disputes/:id` · `POST …/messages` · `POST …/respond` | participants | |
+| `GET /api/disputes/:id/thread` · `POST /api/disputes/:id/thread` | buyer (`X-Buyer-Token`), seller, mediator | Case chat. The mediator can add `requestFrom: buyer \| seller \| both` to ask for information. |
+| `GET /api/admin/disputes` · `POST /api/admin/disputes/:id/resolve` | mediator | |
+| `GET /api/admin/overview` · `/orders` · `/sellers` · `/refunds` · `POST /api/admin/refunds/:id/mark-paid` | mediator | Admin console. Buyer refunds are paid by hand, then recorded with the transfer reference. |
+| `POST /api/uploads` | seller, or buyer via `X-Buyer-Token` | image upload, returns `{ url }` |
+| `POST /api/dev/simulate-payment` | dev only | only exists when `PAYMENT_SIMULATION=true` and not production |
 
----
+## Database migrations
 
-## Notes
+`prisma/migrations/0_baseline` matches the schema the hackathon deployment
+was running; `1_escrow_hardening` adds payouts, the buyer token, and paid
+amount tracking, and drops the unused plaintext Nostr keys.
 
-- **Node.js ≥ 22** is required (specified in `.nvmrc`).
-- The server uses ES modules (`"type": "module"` in package.json) — all imports must use `.js` extensions.
-- Pino logger outputs JSON in production and pretty-printed text in development.
-- The `normalize.ts` module converts Prisma model shapes to API-safe response shapes (e.g., removes internal fields, standardises dates).
+**Existing database** (already has the tables): mark the baseline as
+applied once, then deploy:
+
+```bash
+npx prisma migrate status                      # check what it thinks first
+npx prisma migrate resolve --applied 0_baseline
+npx prisma migrate deploy
+```
+
+**New database:** `npx prisma migrate deploy` applies both.
+
+## Production checklist
+
+- `NODE_ENV=production`, `JWT_SECRET` ≥ 32 random characters (the server
+  refuses to start otherwise).
+- A real `PAYMENT_PROVIDER` with its webhook signing key (mock is refused in
+  production; simulation is always off in production).
+- `MEDIATOR_PASSWORD` set to a strong password.
+- `FRONTEND_ORIGINS` lists only your real frontend URLs.

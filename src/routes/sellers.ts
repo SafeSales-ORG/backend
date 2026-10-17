@@ -1,19 +1,26 @@
 import type { FastifyPluginAsync } from 'fastify';
 import { z } from 'zod';
+import { imageUrl } from '../lib/images.js';
 import { prisma } from '../db/client.js';
-import { BadRequest, NotFound } from '../lib/errors.js';
+import { Conflict, NotFound } from '../lib/errors.js';
 import { requireAuth } from '../middleware/auth.js';
-import { bankAccountLookup } from '../services/nomba.js';
+import { payments } from '../services/payments/index.js';
 import { normalizeSeller } from '../lib/normalize.js';
 
+const AvatarUrl = imageUrl(500_000);
+
 const CreateSellerSchema = z.object({
-  name: z.string().min(2).max(140),
+  name: z.string().trim().min(2).max(140),
   handle: z
     .string()
+    .trim()
+    .toLowerCase()
     .min(3)
     .max(30)
     .regex(/^[a-z0-9_]+$/),
-  avatar: z.string().url().optional(),
+  avatar: AvatarUrl.optional(),
+  // The frontend sends `avatarUrl`.
+  avatarUrl: AvatarUrl.optional(),
   bio: z.string().max(1000).optional(),
   bankCode: z.string().min(3).max(10),
   bankAccountNumber: z.string().regex(/^\d{10}$/),
@@ -21,8 +28,8 @@ const CreateSellerSchema = z.object({
 });
 
 const UpdateSellerSchema = z.object({
-  name: z.string().min(2).max(140).optional(),
-  avatar: z.string().url().optional(),
+  name: z.string().trim().min(2).max(140).optional(),
+  avatar: AvatarUrl.optional(),
   bio: z.string().max(1000).optional(),
   bankCode: z.string().min(3).max(10).optional(),
   bankAccountNumber: z.string().regex(/^\d{10}$/).optional(),
@@ -43,17 +50,17 @@ const sellersRoute: FastifyPluginAsync = async (app) => {
     });
     if (existing) {
       if (existing.userId === request.user!.sub) {
-        throw new BadRequest('You already have a seller profile');
+        throw new Conflict('You already have a seller profile');
       }
-      throw new BadRequest('That handle is taken');
+      throw new Conflict('That handle is taken');
     }
 
     const user = await prisma.user.findUnique({
       where: { id: request.user!.sub },
     });
-    if (!user) throw new BadRequest('User not found');
+    if (!user) throw new NotFound('User not found');
 
-    const account = await bankAccountLookup({
+    const account = await payments.resolveBankAccount({
       accountNumber: body.bankAccountNumber,
       bankCode: body.bankCode,
     });
@@ -61,10 +68,10 @@ const sellersRoute: FastifyPluginAsync = async (app) => {
     const seller = await prisma.seller.create({
       data: {
         userId: request.user!.sub,
-        npub: user.nostrNpub ?? `npub_${request.user!.sub.slice(0, 16)}`,
+        npub: user.nostrNpub ?? `ss_${user.id}`,
         name: body.name,
         handle: body.handle,
-        avatar: body.avatar,
+        avatar: body.avatar ?? body.avatarUrl,
         bio: body.bio,
         bankCode: body.bankCode,
         bankAccountNumber: body.bankAccountNumber,
@@ -74,7 +81,22 @@ const sellersRoute: FastifyPluginAsync = async (app) => {
     });
 
     reply.code(201);
-    return { seller: normalizeSeller(seller as unknown as Record<string, unknown>) };
+    return { seller: normalizeSeller(seller) };
+  });
+
+  /** The signed-in seller's own profile, with their payout account (masked). */
+  app.get('/api/sellers/me', { preHandler: [requireAuth] }, async (request) => {
+    const seller = await prisma.seller.findUnique({ where: { userId: request.user!.sub } });
+    if (!seller) throw new NotFound('Seller profile not found');
+    return {
+      seller: normalizeSeller(seller),
+      payout: {
+        bankCode: seller.bankCode,
+        bankName: seller.bankName ?? null,
+        accountName: seller.bankAccountName ?? null,
+        accountNumberLast4: seller.bankAccountNumber.slice(-4),
+      },
+    };
   });
 
   app.get('/api/sellers/:handle', async (request) => {
@@ -96,7 +118,7 @@ const sellersRoute: FastifyPluginAsync = async (app) => {
     });
     if (!seller) throw new NotFound('Seller not found');
 
-    return { seller: normalizeSeller(seller as unknown as Record<string, unknown>) };
+    return { seller: normalizeSeller(seller) };
   });
 
   app.put('/api/sellers', { preHandler: [requireAuth] }, async (request) => {
@@ -109,7 +131,7 @@ const sellersRoute: FastifyPluginAsync = async (app) => {
       const bankCode = body.bankCode ?? seller.bankCode;
       const bankAccountNumber = body.bankAccountNumber ?? seller.bankAccountNumber;
 
-      const account = await bankAccountLookup({ accountNumber: bankAccountNumber, bankCode });
+      const account = await payments.resolveBankAccount({ accountNumber: bankAccountNumber, bankCode });
 
       const updated = await prisma.seller.update({
         where: { id: seller.id },
@@ -121,7 +143,7 @@ const sellersRoute: FastifyPluginAsync = async (app) => {
         },
       });
 
-      return { seller: normalizeSeller(updated as unknown as Record<string, unknown>) };
+      return { seller: normalizeSeller(updated) };
     }
 
     const updated = await prisma.seller.update({
@@ -129,7 +151,7 @@ const sellersRoute: FastifyPluginAsync = async (app) => {
       data: body,
     });
 
-    return { seller: normalizeSeller(updated as unknown as Record<string, unknown>) };
+    return { seller: normalizeSeller(updated) };
   });
 };
 

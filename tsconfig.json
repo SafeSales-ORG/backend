@@ -24,6 +24,6 @@
     "incremental": true,
     "tsBuildInfoFile": "./.tsbuildinfo"
   },
-  "include": ["src/**/*", "scripts/**/*"],
+  "include": ["src/**/*", "test/**/*", "vitest.config.ts"],
   "exclude": ["node_modules", "dist", ".tsbuildinfo"]
 }

@@ -25,10 +25,29 @@ enum DisputeStatus {
   resolved
 }
 
+enum DisputeParty {
+  buyer
+  seller
+  mediator
+  system
+}
+
 enum UserRole {
   USER
   MEDIATOR
   ADMIN
+}
+
+enum PayoutKind {
+  SELLER_RELEASE
+  BUYER_REFUND
+}
+
+enum PayoutStatus {
+  pending // created; transfer not yet confirmed by the provider
+  succeeded
+  failed // provider rejected it — needs a human
+  manual // must be paid out by hand (e.g. buyer refund, no bank details on file)
 }
 
 enum AuthProvider {
@@ -43,35 +62,35 @@ model User {
   passwordHash  String?
   googleId      String?      @unique
   facebookId    String?      @unique
-  role          UserRole       @default(USER)
+  role          UserRole     @default(USER)
   authProvider  AuthProvider
-  emailVerified Boolean        @default(false)
-  nostrNsec     String?
+  emailVerified Boolean      @default(false)
+  // Opaque public id (historically a Nostr npub). Also used as Seller.npub.
   nostrNpub     String?
   createdAt     DateTime     @default(now())
   updatedAt     DateTime     @updatedAt
 
-  seller Seller?
-  orders Order[]
+  seller          Seller?
+  orders          Order[]
   disputeMessages DisputeMessage[]
 }
 
 model Seller {
-  id       String @id @default(cuid())
-  userId   String @unique
-  user     User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+  id     String @id @default(cuid())
+  userId String @unique
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
 
-  npub   String @unique
-  handle String @unique
-  name   String
-  avatar String?
-  bio    String?
+  npub     String  @unique
+  handle   String  @unique
+  name     String
+  avatar   String?
+  bio      String?
   delivery String?
 
-  bankCode           String
-  bankName           String?
-  bankAccountNumber  String
-  bankAccountName    String?
+  bankCode          String
+  bankName          String?
+  bankAccountNumber String
+  bankAccountName   String?
 
   verified  Boolean  @default(false)
   createdAt DateTime @default(now())
@@ -94,7 +113,7 @@ model Listing {
   images      Json
   category    String
   variants    Json?
-  inStock     Int      @default(1)
+  inStock     Int     @default(1)
   delivery    String?
   deliveryFee Int?
   active      Boolean @default(true)
@@ -111,7 +130,11 @@ model Listing {
 model Order {
   id         String @id @default(cuid())
   shortId    String @unique
+  // Shared reference: seller dashboard + seller-side routes use this.
   orderToken String @unique
+  // Buyer's secret (order link + email). Required for buyer-only actions:
+  // confirm delivery, release funds, open a dispute as the buyer.
+  buyerToken String @unique
 
   listingId String
   listing   Listing @relation(fields: [listingId], references: [id])
@@ -121,30 +144,35 @@ model Order {
   buyerId String?
   buyer   User?   @relation(fields: [buyerId], references: [id])
 
-  buyerName  String
-  buyerPhone String?
-  buyerEmail String?
+  buyerName       String
+  buyerPhone      String?
+  buyerEmail      String?
   deliveryAddress String?
 
-  quantity Int    @default(1)
+  quantity Int     @default(1)
   variant  String?
 
-  priceNGN Int
+  // Total the buyer pays (items + delivery), in whole naira.
+  priceNGN       Int
+  deliveryFeeNGN Int @default(0)
 
   status EscrowStatus @default(pending_payment)
 
-  accountNumber String?
-  accountName   String?
-  bankName      String?
-  nombaReference String?
+  // Pay-in account issued by the payment provider for this order.
+  accountNumber    String?
+  accountName      String?
+  bankName         String?
+  paymentReference String?   @map("nombaReference")
+  paidAmountNGN    Int?
+  paidAt           DateTime?
 
   trackingNumber String?
   carrier        String?
 
-  shippedAt  DateTime?
+  shippedAt   DateTime?
   deliveredAt DateTime?
-  releasedAt DateTime?
-  refundedAt DateTime?
+  releasedAt  DateTime?
+  refundedAt  DateTime?
 
   autoReleaseAt DateTime?
 
@@ -154,6 +182,7 @@ model Order {
   updatedAt DateTime @updatedAt
 
   dispute Dispute?
+  payouts Payout[]
 
   @@index([sellerId])
   @@index([status])
@@ -161,13 +190,13 @@ model Order {
 }
 
 model WebhookEvent {
-  id          String   @id @default(cuid())
-  provider    String
-  externalId  String   @unique
-  payload     Json
-  status      String
-  attempts    Int      @default(0)
-  receivedAt  DateTime @default(now())
+  id         String   @id @default(cuid())
+  provider   String
+  externalId String   @unique
+  payload    Json
+  status     String
+  attempts   Int      @default(0)
+  receivedAt DateTime @default(now())
 }
 
 model Dispute {
@@ -187,6 +216,9 @@ model Dispute {
 
   isReturn       Boolean @default(false)
   returnEvidence Json?
+  // [{ url, by: 'buyer' | 'seller', at }] — appended by each party.
+  evidence       Json    @default("[]")
+  sellerResponse String?
 
   resolution Json?
 
@@ -198,15 +230,45 @@ model Dispute {
   @@index([status])
 }
 
+// The case thread: buyer, seller and mediator all see every message.
 model DisputeMessage {
-  id        String   @id @default(cuid())
-  disputeId String
-  dispute   Dispute  @relation(fields: [disputeId], references: [id], onDelete: Cascade)
-  authorId  String
-  author    User     @relation(fields: [authorId], references: [id])
-  content   String
-  createdAt DateTime @default(now())
+  id          String       @id @default(cuid())
+  disputeId   String
+  dispute     Dispute      @relation(fields: [disputeId], references: [id], onDelete: Cascade)
+  // Null for buyers (they have no account) and system notes.
+  authorId    String?
+  author      User?        @relation(fields: [authorId], references: [id], onDelete: SetNull)
+  authorRole  DisputeParty
+  content     String
+  // Image URLs attached to this message.
+  attachments Json         @default("[]")
+  // Set when the mediator asks a party for information: buyer | seller | both.
+  requestFrom String?
+  createdAt   DateTime     @default(now())
 
   @@index([disputeId])
   @@index([authorId])
+}
+
+// Money leaving escrow. One row per (order, kind): the unique constraint is
+// what makes releases and refunds idempotent.
+model Payout {
+  id          String       @id @default(cuid())
+  orderId     String
+  order       Order        @relation(fields: [orderId], references: [id], onDelete: Restrict)
+  kind        PayoutKind
+  status      PayoutStatus @default(pending)
+  amountNGN   Int
+  feeNGN      Int          @default(0)
+  // Deterministic reference sent to the provider — retries reuse it.
+  reference   String       @unique
+  providerRef String?
+  error       String?
+  attempts    Int          @default(0)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([orderId, kind])
+  @@index([status])
 }

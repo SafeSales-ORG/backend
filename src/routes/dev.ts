@@ -1,42 +1,36 @@
 import type { FastifyPluginAsync } from 'fastify';
 import { z } from 'zod';
-import { env } from '../env.js';
+import { paymentSimulationEnabled } from '../env.js';
 import { prisma } from '../db/client.js';
 import { logger } from '../lib/logger.js';
 import { NotFound } from '../lib/errors.js';
+import { markFunded } from '../services/escrow.js';
+import { onOrderFunded } from '../services/notifications.js';
 
 const SimulatePaymentSchema = z.object({
-  orderToken: z.string().min(8).max(64),
-  amountNGN: z.number().int().positive().optional(),
+  orderToken: z.string().min(8).max(128),
 });
 
+/**
+ * Dev/staging only: mark an order paid without a real transfer.
+ * Not registered at all unless PAYMENT_SIMULATION=true outside production.
+ */
 const devRoute: FastifyPluginAsync = async (app) => {
-  app.addHook('onRequest', async (_request, reply) => {
-    if (env.NODE_ENV === 'production' && !env.NOMBA_SIMULATION) {
-      reply.code(404).send({ error: { code: 'NOT_FOUND', message: 'Not found' } });
-    }
-  });
+  if (!paymentSimulationEnabled) return;
 
   app.post('/api/dev/simulate-payment', async (request) => {
-    const body = SimulatePaymentSchema.parse(request.body);
-
-    const order = await prisma.order.findUnique({ where: { orderToken: body.orderToken } });
+    const { orderToken } = SimulatePaymentSchema.parse(request.body);
+    const order = await prisma.order.findFirst({
+      where: { OR: [{ buyerToken: orderToken }, { orderToken }] },
+    });
     if (!order) throw new NotFound('Order not found');
 
-    const amount = body.amountNGN ?? order.priceNGN;
-
-    await prisma.order.update({
-      where: { id: order.id },
-      data: {
-        status: 'funded',
-        nombaReference: `sim_${Date.now()}`,
-        notes: `Simulated payment: ₦${amount}`,
-      },
-    });
-
-    logger.info({ orderId: order.id, shortId: order.shortId, amount }, 'Payment simulated');
-
-    return { ok: true, simulatedAmountNGN: amount };
+    const funded = await markFunded(order.id, order.priceNGN, `sim_${order.orderToken}`);
+    if (funded) {
+      logger.info({ orderId: order.id, shortId: order.shortId }, 'Payment simulated');
+      await onOrderFunded(order.id);
+    }
+    return { ok: true, funded, simulatedAmountNGN: order.priceNGN };
   });
 };
 

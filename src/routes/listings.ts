@@ -1,11 +1,16 @@
 import type { FastifyPluginAsync } from 'fastify';
 import { z } from 'zod';
+import { imageUrl } from '../lib/images.js';
 import { prisma } from '../db/client.js';
-import { BadRequest, NotFound } from '../lib/errors.js';
+import { BadRequest, Forbidden, NotFound } from '../lib/errors.js';
 import { requireAuth } from '../middleware/auth.js';
+import { normalizeListing, normalizeSeller } from '../lib/normalize.js';
+
+// Images are compressed client-side to data: URLs (or are https URLs).
+const ImageUrl = imageUrl(1_500_000);
 
 const ImageSchema = z.object({
-  url: z.string().url().optional(),
+  url: ImageUrl.optional(),
   seed: z.string().optional(),
   alt: z.string().max(200).optional(),
 }).refine((v) => v.url || v.seed, 'Image must have a url or a seed');
@@ -36,8 +41,8 @@ const UpdateListingSchema = z.object({
 });
 
 const ListingsQuerySchema = z.object({
-  seller: z.string().regex(/^npub1[0-9a-z]+$/).optional(),
-  active: z.enum(['true', 'false']).optional(),
+  seller: z.string().min(1).max(128).optional(),
+  limit: z.coerce.number().int().min(1).max(100).default(60),
 });
 
 const listingsRoute: FastifyPluginAsync = async (app) => {
@@ -65,7 +70,18 @@ const listingsRoute: FastifyPluginAsync = async (app) => {
     });
 
     reply.code(201);
-    return { listing };
+    return { listing: normalizeListing(listing) };
+  });
+
+  /** The signed-in seller's own listings, including hidden/sold-out ones. */
+  app.get('/api/listings/mine', { preHandler: [requireAuth] }, async (request) => {
+    const seller = await prisma.seller.findUnique({ where: { userId: request.user!.sub } });
+    if (!seller) throw new NotFound('Seller profile not found');
+    const listings = await prisma.listing.findMany({
+      where: { sellerId: seller.id },
+      orderBy: { createdAt: 'desc' },
+    });
+    return { listings: listings.map(normalizeListing) };
   });
 
   app.get<{ Params: { id: string } }>('/api/listings/:id', async (request) => {
@@ -73,9 +89,9 @@ const listingsRoute: FastifyPluginAsync = async (app) => {
       where: { id: request.params.id },
       include: { seller: true },
     });
-    if (!listing) throw new NotFound(`Listing ${request.params.id} not found`);
+    if (!listing || !listing.active) throw new NotFound('Listing not found');
 
-    return { listing, seller: listing.seller };
+    return { listing: normalizeListing(listing), seller: normalizeSeller(listing.seller) };
   });
 
   app.patch<{ Params: { id: string } }>(
@@ -89,7 +105,7 @@ const listingsRoute: FastifyPluginAsync = async (app) => {
 
       const seller = await prisma.seller.findUnique({ where: { userId: request.user!.sub } });
       if (!seller || listing.sellerId !== seller.id) {
-        throw new BadRequest('You are not the owner of this listing');
+        throw new Forbidden('You are not the owner of this listing');
       }
 
       const updated = await prisma.listing.update({
@@ -97,7 +113,7 @@ const listingsRoute: FastifyPluginAsync = async (app) => {
         data: body,
       });
 
-      return { listing: updated };
+      return { listing: normalizeListing(updated) };
     },
   );
 
@@ -110,7 +126,7 @@ const listingsRoute: FastifyPluginAsync = async (app) => {
 
       const seller = await prisma.seller.findUnique({ where: { userId: request.user!.sub } });
       if (!seller || listing.sellerId !== seller.id) {
-        throw new BadRequest('You are not the owner of this listing');
+        throw new Forbidden('You are not the owner of this listing');
       }
 
       await prisma.listing.update({
@@ -125,22 +141,30 @@ const listingsRoute: FastifyPluginAsync = async (app) => {
   app.get('/api/listings', async (request) => {
     const query = ListingsQuerySchema.parse(request.query);
 
+    // No seller: the public marketplace feed — newest active, in-stock
+    // listings across all shops, each with its shop's public profile.
     if (!query.seller) {
-      throw new BadRequest('?seller=<npub> query parameter is required');
+      const listings = await prisma.listing.findMany({
+        where: { active: true, inStock: { gt: 0 } },
+        include: { seller: true },
+        orderBy: { createdAt: 'desc' },
+        take: query.limit,
+      });
+      return {
+        listings: listings.map((l) => ({ ...normalizeListing(l), seller: normalizeSeller(l.seller) })),
+      };
     }
 
     const seller = await prisma.seller.findUnique({ where: { npub: query.seller } });
     if (!seller) throw new NotFound('Seller not found');
 
+    // Public view: only the shop's active listings.
     const listings = await prisma.listing.findMany({
-      where: {
-        sellerId: seller.id,
-        ...(query.active !== undefined && { active: query.active === 'true' }),
-      },
+      where: { sellerId: seller.id, active: true },
       orderBy: { createdAt: 'desc' },
     });
 
-    return { listings };
+    return { listings: listings.map(normalizeListing), seller: normalizeSeller(seller) };
   });
 };
 

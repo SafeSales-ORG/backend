@@ -1,403 +1,287 @@
-import type { FastifyPluginAsync } from 'fastify';
+import type { FastifyPluginAsync, FastifyReply, FastifyRequest } from 'fastify';
 import { z } from 'zod';
+import { imageUrl } from '../lib/images.js';
 import { prisma } from '../db/client.js';
-import { BadRequest, NotFound, Forbidden } from '../lib/errors.js';
-import { requireAuth, requireMediator } from '../middleware/auth.js';
+import { Conflict, Forbidden, NotFound, Unauthorized, isUniqueViolation } from '../lib/errors.js';
+import { optionalAuth, requireAuth, requireMediator } from '../middleware/auth.js';
 import { normalizeOrder, normalizeSeller, normalizeListing, normalizeDispute } from '../lib/normalize.js';
-import { transferToBank } from '../services/nomba.js';
+import { resolveDispute } from '../services/escrow.js';
+import { partyFor, partyNames, postToThread, recordDecision, threadMessage, waitingOn } from '../services/disputeThread.js';
+
+// Evidence images arrive as compressed data: URLs or https URLs.
+const Evidence = z.array(imageUrl(1_500_000)).max(6);
 
 const OpenDisputeSchema = z.object({
-  orderToken: z.string().min(1),
-  reason: z.string().min(10).max(2000),
-  summary: z.string().min(10).max(500).optional(),
-  isReturn: z.boolean().optional().default(false),
+  reason: z.string().trim().min(1).max(2000),
+  summary: z.string().trim().min(1).max(500).optional(),
+  openedBy: z.enum(['buyer', 'seller']),
+  evidence: Evidence.optional(),
 });
 
 const AddMessageSchema = z.object({
-  content: z.string().min(1).max(2000),
+  content: z.string().trim().min(1).max(2000),
+  attachments: z.array(imageUrl(1_500_000)).max(4).optional(),
+  // Mediator only: ask a party for information.
+  requestFrom: z.enum(['buyer', 'seller', 'both']).optional(),
 });
 
-const FrontendOpenDisputeSchema = z.object({
-  reason: z.string().min(1).max(2000),
-  summary: z.string().min(1).max(500).optional(),
-  openedBy: z.enum(['buyer', 'seller']),
-  evidence: z.array(z.string()).optional(),
-});
-
-const FrontendRespondSchema = z.object({
+const RespondSchema = z.object({
   stance: z.enum(['explain', 'partial', 'full', 'counter']),
-  message: z.string().min(1).max(2000),
-  evidence: z.array(z.string()).optional(),
+  message: z.string().trim().min(1).max(2000),
+  evidence: Evidence.optional(),
 });
 
-const FrontendResolveSchema = z.object({
-  outcome: z.enum(['refund_buyer', 'release_seller', 'split']),
-  splitPct: z.number().int().min(0).max(100).optional(),
-  rationale: z.string().min(1).max(2000),
+const ResolveSchema = z
+  .object({
+    outcome: z.enum(['refund_buyer', 'release_seller', 'split']),
+    // `buyerPercent` is the older name the frontend sent; accept both.
+    splitPct: z.number().int().min(0).max(100).optional(),
+    buyerPercent: z.number().int().min(0).max(100).optional(),
+    rationale: z.string().trim().min(1).max(2000),
+  })
+  .refine((b) => b.outcome !== 'split' || b.splitPct !== undefined || b.buyerPercent !== undefined, {
+    message: 'A split needs the buyer percentage',
+    path: ['splitPct'],
+  });
+
+const MediatorUpdateSchema = z.object({
+  // Resolution moves money, so it only happens via /resolve.
+  status: z.enum(['direct_resolution', 'escalated', 'evidence_requested', 'mediating']),
 });
 
-async function getDisputeParticipantCheck(disputeId: string, userId: string) {
+function evidenceItems(urls: string[] | undefined, by: 'buyer' | 'seller') {
+  const at = new Date().toISOString();
+  return (urls ?? []).map((url) => ({ url, by, at }));
+}
+
+const IdParams = z.object({ id: z.string().min(1).max(64) });
+const TokenParams = z.object({ token: z.string().min(8).max(128) });
+
+async function loadDisputeForUser(disputeId: string, userId: string, role?: string) {
   const dispute = await prisma.dispute.findUnique({
     where: { id: disputeId },
     include: { order: { include: { seller: true } } },
   });
   if (!dispute) throw new NotFound('Dispute not found');
+  const isSeller = dispute.order.seller.userId === userId;
+  const isBuyer = dispute.order.buyerId === userId;
+  const isMediator = role === 'MEDIATOR';
+  if (!isSeller && !isBuyer && !isMediator) throw new Forbidden('You are not a participant in this dispute');
+  return { dispute, isSeller, isMediator };
+}
 
-  const isParticipant =
-    dispute.order.buyerId === userId ||
-    dispute.order.seller.userId === userId;
-  return { dispute, isParticipant };
+async function mediatorDisputeList() {
+  const disputes = await prisma.dispute.findMany({
+    include: {
+      order: { include: { listing: true, seller: true } },
+      messages: { orderBy: { createdAt: 'asc' }, select: { authorRole: true, requestFrom: true, createdAt: true } },
+    },
+    orderBy: { createdAt: 'desc' },
+    take: 500,
+  });
+  return {
+    disputes: disputes.map((d) => ({
+      ...normalizeDispute(d),
+      thread: {
+        count: d.messages.filter((m) => m.authorRole !== 'system').length,
+        lastAt: d.messages.at(-1)?.createdAt.toISOString() ?? null,
+        lastFrom: d.messages.at(-1)?.authorRole ?? null,
+        waitingOn: waitingOn(d.status, d.messages),
+      },
+      order: { ...normalizeOrder(d.order), listing: normalizeListing(d.order.listing) },
+      seller: normalizeSeller(d.order.seller),
+      listing: normalizeListing(d.order.listing),
+    })),
+  };
 }
 
 const disputesRoute: FastifyPluginAsync = async (app) => {
-  /* Backend-native: create dispute with orderToken in body */
-  app.post('/api/disputes', { preHandler: [requireAuth] }, async (request, reply) => {
+  /**
+   * Open a dispute. The buyer uses their secret buyer token (no account
+   * needed); the seller uses the order reference plus their session.
+   * Opening a dispute pauses auto-release.
+   */
+  app.post('/api/orders/:token/dispute', { preHandler: [optionalAuth] }, async (request, reply) => {
+    const { token } = TokenParams.parse(request.params);
     const body = OpenDisputeSchema.parse(request.body);
 
-    const order = await prisma.order.findUnique({
-      where: { orderToken: body.orderToken },
-      include: { seller: true },
-    });
+    const order =
+      body.openedBy === 'buyer'
+        ? await prisma.order.findUnique({ where: { buyerToken: token }, include: { seller: true } })
+        : await prisma.order.findUnique({ where: { orderToken: token }, include: { seller: true } });
     if (!order) throw new NotFound('Order not found');
 
-    if (order.buyerId !== request.user!.sub && order.seller.userId !== request.user!.sub) {
-      throw new Forbidden('You are not a participant in this order');
+    if (body.openedBy === 'seller') {
+      if (!request.user) throw new Unauthorized('Sign in to open a dispute as the seller');
+      if (order.seller.userId !== request.user.sub) throw new Forbidden('You are not the seller of this order');
     }
 
-    if (!['funded', 'shipped', 'delivered'].includes(order.status)) {
-      throw new BadRequest('Order cannot be disputed in its current state');
+    let dispute;
+    try {
+      dispute = await prisma.$transaction(async (tx) => {
+        const claimed = await tx.order.updateMany({
+          where: { id: order.id, status: { in: ['funded', 'shipped', 'delivered'] } },
+          data: { status: 'disputed', autoReleaseAt: null },
+        });
+        if (claimed.count === 0) throw new Conflict(`Order can't be disputed while it is ${order.status}`);
+
+        const created = await tx.dispute.create({
+          data: {
+            orderId: order.id,
+            reason: body.reason,
+            summary: body.summary,
+            openedBy: body.openedBy,
+            evidence: evidenceItems(body.evidence, body.openedBy),
+          },
+        });
+        const naira = `₦${order.priceNGN.toLocaleString('en-NG')}`;
+        await tx.disputeMessage.create({
+          data: {
+            disputeId: created.id,
+            authorRole: 'system',
+            content: `The ${body.openedBy} reported a problem. ${naira} stays held by SafeSale until a mediator decides. Everyone in this case can see these messages.`,
+          },
+        });
+        await tx.disputeMessage.create({
+          data: {
+            disputeId: created.id,
+            authorId: request.user?.sub ?? null,
+            authorRole: body.openedBy,
+            content: body.summary ? `${body.reason}\n\n${body.summary}` : body.reason,
+            attachments: body.evidence ?? [],
+          },
+        });
+        return created;
+      });
+    } catch (err) {
+      if (isUniqueViolation(err)) throw new Conflict('A dispute already exists for this order');
+      throw err;
     }
-
-    const existing = await prisma.dispute.findUnique({ where: { orderId: order.id } });
-    if (existing) throw new BadRequest('A dispute already exists for this order');
-
-    const dispute = await prisma.dispute.create({
-      data: {
-        orderId: order.id,
-        reason: body.reason,
-        summary: body.summary,
-        openedBy: request.user!.sub,
-        isReturn: body.isReturn,
-      },
-    });
-
-    await prisma.order.update({
-      where: { id: order.id },
-      data: { status: 'disputed' },
-    });
 
     reply.code(201);
     return {
-      order: normalizeOrder(order as unknown as Record<string, unknown>),
-      dispute: normalizeDispute(dispute as unknown as Record<string, unknown> | null),
+      order: normalizeOrder(await prisma.order.findUniqueOrThrow({ where: { id: order.id } })),
+      dispute: normalizeDispute(dispute),
     };
   });
 
-  /* Frontend-facing: create dispute from order token in URL */
-  app.post<{ Params: { token: string } }>(
-    '/api/orders/:token/dispute',
-    { preHandler: [requireAuth] },
-    async (request, reply) => {
-      const body = FrontendOpenDisputeSchema.parse(request.body);
+  app.get('/api/disputes/:id', { preHandler: [requireAuth] }, async (request) => {
+    const { id } = IdParams.parse(request.params);
+    const { dispute } = await loadDisputeForUser(id, request.user!.sub, request.user!.role);
+    const messages = await prisma.disputeMessage.findMany({ where: { disputeId: id }, orderBy: { createdAt: 'asc' } });
+    const names = partyNames(dispute);
+    return { dispute: { ...normalizeDispute(dispute), messages: messages.map((m) => threadMessage(m, names)) } };
+  });
 
-      const order = await prisma.order.findUnique({
-        where: { orderToken: request.params.token },
-        include: { seller: true, listing: true },
-      });
-      if (!order) throw new NotFound('Order not found');
+  /**
+   * The case thread. Buyer (order link token), seller and mediator all read
+   * and write the same conversation while the money stays in escrow.
+   */
+  app.get('/api/disputes/:id/thread', async (request) => {
+    const { id } = IdParams.parse(request.params);
+    const { dispute, party } = await partyFor(request, id);
+    const messages = await prisma.disputeMessage.findMany({ where: { disputeId: id }, orderBy: { createdAt: 'asc' } });
+    const names = partyNames(dispute);
+    return {
+      viewer: party,
+      dispute: normalizeDispute(dispute),
+      waitingOn: waitingOn(dispute.status, messages),
+      messages: messages.map((m) => threadMessage(m, names)),
+    };
+  });
 
-      if (order.buyerId !== request.user!.sub && order.seller.userId !== request.user!.sub) {
-        throw new Forbidden('You are not a participant in this order');
-      }
+  const postMessage = async (request: FastifyRequest, reply: FastifyReply) => {
+    const { id } = IdParams.parse(request.params);
+    const body = AddMessageSchema.parse(request.body);
+    const { dispute, party, userId } = await partyFor(request, id);
+    const message = await postToThread({
+      dispute,
+      party,
+      userId,
+      content: body.content,
+      attachments: body.attachments ?? [],
+      requestFrom: body.requestFrom,
+    });
+    reply.code(201);
+    return { message: threadMessage(message, partyNames(dispute)) };
+  };
+  const messageLimit = { config: { rateLimit: { max: 20, timeWindow: '1 minute' } } };
+  app.post('/api/disputes/:id/thread', messageLimit, postMessage);
+  app.post('/api/disputes/:id/messages', messageLimit, postMessage);
 
-      if (!['funded', 'shipped', 'delivered'].includes(order.status)) {
-        throw new BadRequest('Order cannot be disputed in its current state');
-      }
+  /** Seller responds to a dispute. */
+  app.post('/api/disputes/:id/respond', { preHandler: [requireAuth] }, async (request) => {
+    const { id } = IdParams.parse(request.params);
+    const body = RespondSchema.parse(request.body);
+    const { dispute, isSeller } = await loadDisputeForUser(id, request.user!.sub, request.user!.role);
+    if (!isSeller) throw new Forbidden('Only the seller can respond to a dispute');
+    if (dispute.status === 'resolved') throw new Conflict('This dispute is closed');
 
-      const existing = await prisma.dispute.findUnique({ where: { orderId: order.id } });
-      if (existing) throw new BadRequest('A dispute already exists for this order');
-
-      const dispute = await prisma.dispute.create({
-        data: {
-          orderId: order.id,
-          reason: body.reason,
-          summary: body.summary,
-          openedBy: request.user!.sub,
-          returnEvidence: body.evidence ?? [],
-        },
-      });
-
-      await prisma.order.update({
-        where: { id: order.id },
-        data: { status: 'disputed' },
-      });
-
-      reply.code(201);
-      return {
-        order: normalizeOrder(order as unknown as Record<string, unknown>),
-        dispute: normalizeDispute(dispute as unknown as Record<string, unknown> | null),
-      };
-    },
-  );
-
-  app.get<{ Params: { id: string } }>(
-    '/api/disputes/:id',
-    { preHandler: [requireAuth] },
-    async (request) => {
-      const dispute = await prisma.dispute.findUnique({
-        where: { id: request.params.id },
-        include: {
-          order: { include: { seller: true } },
-          messages: {
-            include: { author: { select: { id: true, email: true } } },
-            orderBy: { createdAt: 'asc' },
-          },
-        },
-      });
-      if (!dispute) throw new NotFound('Dispute not found');
-
-      const isParticipant =
-        dispute.order.buyerId === request.user!.sub ||
-        dispute.order.seller.userId === request.user!.sub ||
-        request.user!.role === 'MEDIATOR';
-      if (!isParticipant) throw new Forbidden('You are not a participant in this dispute');
-
-      return { dispute };
-    },
-  );
-
-  /* Backend-native: add a message to a dispute */
-  app.post<{ Params: { id: string } }>(
-    '/api/disputes/:id/messages',
-    { preHandler: [requireAuth] },
-    async (request) => {
-      const body = AddMessageSchema.parse(request.body);
-
-      const { dispute, isParticipant } = await getDisputeParticipantCheck(request.params.id, request.user!.sub);
-      if (!isParticipant && request.user!.role !== 'MEDIATOR') {
-        throw new Forbidden('You are not a participant in this dispute');
-      }
-
-      const message = await prisma.disputeMessage.create({
+    const existing = Array.isArray(dispute.evidence) ? dispute.evidence : [];
+    await prisma.$transaction([
+      prisma.disputeMessage.create({
         data: {
           disputeId: dispute.id,
           authorId: request.user!.sub,
-          content: body.content,
-        },
-      });
-
-      return { message };
-    },
-  );
-
-  /* Frontend-facing: seller responds to a dispute */
-  app.post<{ Params: { id: string } }>(
-    '/api/disputes/:id/respond',
-    { preHandler: [requireAuth] },
-    async (request) => {
-      const body = FrontendRespondSchema.parse(request.body);
-
-      const { dispute, isParticipant } = await getDisputeParticipantCheck(request.params.id, request.user!.sub);
-      if (!isParticipant) throw new Forbidden('You are not a participant in this dispute');
-
-      const isSeller = dispute.order.seller.userId === request.user!.sub;
-      if (!isSeller) throw new Forbidden('Only the seller can respond to a dispute');
-
-      await prisma.disputeMessage.create({
-        data: {
-          disputeId: dispute.id,
-          authorId: request.user!.sub,
+          authorRole: 'seller',
           content: body.message,
+          attachments: body.evidence ?? [],
         },
-      });
-
-      if (body.evidence && body.evidence.length > 0) {
-        await prisma.dispute.update({
-          where: { id: dispute.id },
-          data: { returnEvidence: body.evidence, status: 'escalated' },
-        });
-      }
-
-      const updated = await prisma.dispute.findUnique({
-        where: { id: dispute.id },
-        include: { order: { include: { listing: true, seller: true } } },
-      });
-
-      return {
-        order: normalizeOrder(updated!.order as unknown as Record<string, unknown>),
-        dispute: normalizeDispute(updated as unknown as Record<string, unknown> | null),
-      };
-    },
-  );
-
-  /* Frontend-facing: mediator dispute list (GET /api/admin/disputes) */
-  app.get(
-    '/api/mediator/disputes',
-    { preHandler: [requireMediator] },
-    async () => {
-      const disputes = await prisma.dispute.findMany({
-        include: {
-          order: { include: { listing: true, seller: true } },
-          messages: { orderBy: { createdAt: 'desc' }, take: 1 },
-        },
-        orderBy: { createdAt: 'desc' },
-      });
-
-      return {
-        disputes: disputes.map((d) => ({
-          ...normalizeDispute(d as unknown as Record<string, unknown>),
-          order: {
-            ...normalizeOrder(d.order as unknown as Record<string, unknown>),
-            listing: normalizeListing((d.order as any).listing as unknown as Record<string, unknown>),
-          },
-          seller: normalizeSeller((d.order as any).seller as unknown as Record<string, unknown>),
-          listing: normalizeListing((d.order as any).listing as unknown as Record<string, unknown>),
-        })),
-      };
-    },
-  );
-
-  /* Frontend-facing alias: GET /api/admin/disputes */
-  app.get(
-    '/api/admin/disputes',
-    { preHandler: [requireMediator] },
-    async () => {
-      const disputes = await prisma.dispute.findMany({
-        include: {
-          order: { include: { listing: true, seller: true } },
-          messages: { orderBy: { createdAt: 'desc' }, take: 1 },
-        },
-        orderBy: { createdAt: 'desc' },
-      });
-
-      return {
-        disputes: disputes.map((d) => ({
-          ...normalizeDispute(d as unknown as Record<string, unknown>),
-          order: {
-            ...normalizeOrder(d.order as unknown as Record<string, unknown>),
-            listing: normalizeListing((d.order as any).listing as unknown as Record<string, unknown>),
-          },
-          seller: normalizeSeller((d.order as any).seller as unknown as Record<string, unknown>),
-          listing: normalizeListing((d.order as any).listing as unknown as Record<string, unknown>),
-        })),
-      };
-    },
-  );
-
-  /* Backend-native: update dispute status/resolution */
-  app.patch<{ Params: { id: string } }>(
-    '/api/mediator/disputes/:id',
-    { preHandler: [requireMediator] },
-    async (request) => {
-      const body = z.object({
-        status: z.enum(['direct_resolution', 'escalated', 'resolved']).optional(),
-        resolution: z.any().optional(),
-      }).parse(request.body);
-
-      const dispute = await prisma.dispute.findUnique({
-        where: { id: request.params.id },
-      });
-      if (!dispute) throw new NotFound('Dispute not found');
-
-      const data: Record<string, unknown> = {};
-      if (body.status) data.status = body.status;
-      if (body.resolution) data.resolution = body.resolution;
-      if (body.status === 'resolved') data.resolvedAt = new Date();
-
-      const updated = await prisma.dispute.update({
-        where: { id: dispute.id },
-        data,
-      });
-
-      return { dispute: normalizeDispute(updated as unknown as Record<string, unknown> | null) };
-    },
-  );
-
-  /* Frontend-facing: mediator resolves a dispute */
-  app.post<{ Params: { id: string } }>(
-    '/api/admin/disputes/:id/resolve',
-    { preHandler: [requireMediator] },
-    async (request) => {
-      const body = FrontendResolveSchema.parse(request.body);
-
-      const dispute = await prisma.dispute.findUnique({
-        where: { id: request.params.id },
-        include: { order: { include: { seller: true } } },
-      });
-      if (!dispute) throw new NotFound('Dispute not found');
-
-      const amount = dispute.order.priceNGN;
-      const buyerShare =
-        body.outcome === 'refund_buyer' ? 100
-        : body.outcome === 'release_seller' ? 0
-        : Math.min(100, Math.max(0, body.splitPct ?? 50));
-
-      const buyerRefundNGN = Math.round((amount * buyerShare) / 100);
-      const sellerReleaseNGN = amount - buyerRefundNGN;
-      const nextStatus = body.outcome === 'refund_buyer' ? 'refunded' : 'released';
-
-      const resolution: Record<string, unknown> = {
-        outcome: body.outcome,
-        buyerRefundNGN,
-        sellerReleaseNGN,
-        reasoning: body.rationale,
-        mediator: 'SafeSale mediator',
-        resolvedAt: new Date().toISOString(),
-      };
-
-      let transferTxRef: string | null = null;
-
-      if (sellerReleaseNGN > 0) {
-        const seller = dispute.order.seller;
-        if (
-          seller.bankAccountNumber &&
-          seller.bankCode &&
-          seller.bankAccountName
-        ) {
-          const transfer = await transferToBank({
-            amount: sellerReleaseNGN,
-            accountNumber: seller.bankAccountNumber,
-            accountName: seller.bankAccountName,
-            bankCode: seller.bankCode,
-            merchantTxRef: `resolve_${dispute.id}_${Date.now()}`,
-            narration: `SafeSale dispute resolution — seller share of order ${dispute.order.shortId}`,
-          });
-          transferTxRef = transfer.transactionId;
-          resolution.transferTxRef = transferTxRef;
-        }
-      }
-
-      const updated = await prisma.dispute.update({
+      }),
+      prisma.dispute.update({
         where: { id: dispute.id },
         data: {
-          status: 'resolved',
-          resolvedAt: new Date(),
-          resolution: resolution as unknown as any,
+          sellerResponse: body.message,
+          // Append — never overwrite the buyer's evidence.
+          evidence: [...existing, ...evidenceItems(body.evidence, 'seller')],
+          ...(body.evidence?.length && { status: 'escalated' }),
         },
-      });
+      }),
+    ]);
 
-      const orderUpdate: Record<string, unknown> = {
-        status: nextStatus,
-        ...(nextStatus === 'released' ? { releasedAt: new Date() } : { refundedAt: new Date() }),
-      };
-      if (transferTxRef) orderUpdate.nombaReference = transferTxRef;
+    const updated = await prisma.dispute.findUniqueOrThrow({ where: { id: dispute.id }, include: { order: true } });
+    return { order: normalizeOrder(updated.order), dispute: normalizeDispute(updated) };
+  });
 
-      await prisma.order.update({
-        where: { id: dispute.orderId },
-        data: orderUpdate,
-      });
+  app.get('/api/mediator/disputes', { preHandler: [requireMediator] }, mediatorDisputeList);
+  app.get('/api/admin/disputes', { preHandler: [requireMediator] }, mediatorDisputeList);
 
-      const updatedOrder = await prisma.order.findUnique({
-        where: { id: dispute.orderId },
-        include: { listing: true, seller: true },
-      });
+  app.patch('/api/mediator/disputes/:id', { preHandler: [requireMediator] }, async (request) => {
+    const { id } = IdParams.parse(request.params);
+    const body = MediatorUpdateSchema.parse(request.body);
 
-      return {
-        order: normalizeOrder(updatedOrder as unknown as Record<string, unknown>),
-        dispute: normalizeDispute(updated as unknown as Record<string, unknown> | null),
-      };
-    },
-  );
+    const res = await prisma.dispute.updateMany({
+      where: { id, status: { not: 'resolved' } },
+      data: { status: body.status },
+    });
+    if (res.count === 0) throw new Conflict('Dispute not found or already resolved');
+    return { dispute: normalizeDispute(await prisma.dispute.findUniqueOrThrow({ where: { id } })) };
+  });
+
+  /** Mediator settles a dispute: moves the money and closes it. */
+  app.post('/api/admin/disputes/:id/resolve', { preHandler: [requireMediator] }, async (request) => {
+    const { id } = IdParams.parse(request.params);
+    const body = ResolveSchema.parse(request.body);
+
+    await resolveDispute({
+      disputeId: id,
+      outcome: body.outcome,
+      buyerPercent: body.splitPct ?? body.buyerPercent ?? 50,
+      rationale: body.rationale,
+    });
+
+    const dispute = await prisma.dispute.findUniqueOrThrow({ where: { id }, include: { order: true } });
+    const settled = (dispute.resolution ?? {}) as { buyerRefundNGN?: number; sellerReleaseNGN?: number };
+    await recordDecision({
+      disputeId: id,
+      userId: request.user!.sub,
+      outcome: body.outcome,
+      buyerRefundNGN: settled.buyerRefundNGN ?? 0,
+      sellerReleaseNGN: settled.sellerReleaseNGN ?? 0,
+      rationale: body.rationale,
+    });
+    return { order: normalizeOrder({ ...dispute.order, dispute }), dispute: normalizeDispute(dispute) };
+  });
 };
 
 export default disputesRoute;

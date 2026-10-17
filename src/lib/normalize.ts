@@ -1,56 +1,80 @@
-export function normalizeOrder(order: Record<string, unknown>) {
+/**
+ * API response shapes. These are the ONLY way DB rows leave the server:
+ * never return raw Prisma rows (they carry bank details and user ids).
+ */
+import type { Dispute, Listing, Order, Seller } from '@prisma/client';
+
+type PublicSellerInput = Pick<Seller, 'id' | 'npub' | 'handle' | 'name' | 'avatar' | 'bio' | 'verified' | 'createdAt'> &
+  Partial<Pick<Seller, 'delivery'>>;
+
+/**
+ * How a disputed order's money was divided, once the mediator has decided.
+ * Null for orders that never went to a decision.
+ */
+export function settlementOf(dispute: Dispute | null | undefined) {
+  if (!dispute || dispute.status !== 'resolved' || !dispute.resolution) return null;
+  const r = dispute.resolution as { buyerRefundNGN?: number; sellerReleaseNGN?: number; outcome?: string };
+  return {
+    outcome: r.outcome ?? null,
+    buyerRefundNGN: r.buyerRefundNGN ?? 0,
+    sellerReleaseNGN: r.sellerReleaseNGN ?? 0,
+  };
+}
+
+export function normalizeOrder(order: Order & { dispute?: Dispute | null }) {
   return {
     id: order.id,
     shortId: order.shortId,
     orderToken: order.orderToken,
     listingId: order.listingId,
     sellerId: order.sellerId,
-    buyerNpub: null,
-    buyerPubkey: null,
     buyerName: order.buyerName,
     buyerPhone: order.buyerPhone ?? '',
     buyerEmail: order.buyerEmail ?? null,
     buyerCity: '',
     buyerAddress: order.deliveryAddress ?? null,
     contactMethod: null,
+    quantity: order.quantity,
     variant: order.variant ?? null,
-    itemNGN: order.priceNGN,
-    deliveryFee: 0,
+    itemNGN: order.priceNGN - order.deliveryFeeNGN,
+    deliveryFee: order.deliveryFeeNGN,
     amountNGN: order.priceNGN,
+    paidAmountNGN: order.paidAmountNGN ?? null,
     status: order.status,
-    nombaPaymentRef: (order as any).nombaReference ?? null,
-    trackingNumber: (order as any).trackingNumber ?? null,
-    carrier: (order as any).carrier ?? null,
-    shippedAt: dateOrNull((order as any).shippedAt),
-    deliveredAt: dateOrNull((order as any).deliveredAt),
-    releasedAt: dateOrNull((order as any).releasedAt),
-    refundedAt: dateOrNull((order as any).refundedAt),
-    autoReleaseAt: dateOrNull((order as any).autoReleaseAt),
-    notes: (order as any).notes ?? null,
-    createdAt: dateStr((order as any).createdAt),
-    updatedAt: dateStr((order as any).updatedAt),
+    paymentRef: order.paymentReference ?? null,
+    trackingNumber: order.trackingNumber ?? null,
+    carrier: order.carrier ?? null,
+    paidAt: iso(order.paidAt),
+    shippedAt: iso(order.shippedAt),
+    deliveredAt: iso(order.deliveredAt),
+    releasedAt: iso(order.releasedAt),
+    refundedAt: iso(order.refundedAt),
+    autoReleaseAt: iso(order.autoReleaseAt),
+    createdAt: order.createdAt.toISOString(),
+    updatedAt: order.updatedAt.toISOString(),
+    settlement: settlementOf(order.dispute),
   };
 }
 
-export function normalizeSeller(seller: Record<string, unknown>) {
-  if (!seller) return null;
+/** Public seller profile — no bank details, no user id. */
+export function normalizeSeller(seller: PublicSellerInput) {
   return {
     id: seller.id,
     npub: seller.npub,
     pubkey: seller.npub,
     handle: seller.handle,
     name: seller.name,
-    location: (seller as any).location ?? '',
-    category: (seller as any).category ?? '',
-    bio: (seller as any).bio ?? null,
-    verified: (seller as any).verified ?? false,
-    avatarUrl: (seller as any).avatarUrl ?? (seller as any).avatar ?? null,
-    createdAt: dateStr((seller as any).createdAt),
+    location: '',
+    category: '',
+    bio: seller.bio ?? null,
+    delivery: seller.delivery ?? null,
+    verified: seller.verified,
+    avatarUrl: seller.avatar ?? null,
+    createdAt: seller.createdAt.toISOString(),
   };
 }
 
-export function normalizeListing(listing: Record<string, unknown>) {
-  if (!listing) return null;
+export function normalizeListing(listing: Listing) {
   return {
     id: listing.id,
     sellerId: listing.sellerId,
@@ -59,47 +83,38 @@ export function normalizeListing(listing: Record<string, unknown>) {
     priceNGN: listing.priceNGN,
     images: listing.images,
     category: listing.category,
-    variants: (listing as any).variants ?? null,
-    inStock: (listing as any).inStock,
-    delivery: (listing as any).delivery ?? null,
-    deliveryFee: (listing as any).deliveryFee ?? 0,
-    active: (listing as any).active ?? true,
-    nostrEventId: null,
-    createdAt: dateStr((listing as any).createdAt),
-    updatedAt: dateStr((listing as any).updatedAt),
+    variants: listing.variants ?? null,
+    inStock: listing.inStock,
+    delivery: listing.delivery ?? null,
+    deliveryFee: listing.deliveryFee ?? 0,
+    active: listing.active,
+    createdAt: listing.createdAt.toISOString(),
+    updatedAt: listing.updatedAt.toISOString(),
   };
 }
 
-export function normalizeDispute(dispute: Record<string, unknown> | null) {
+export function normalizeDispute(dispute: Dispute | null) {
   if (!dispute) return null;
   return {
     id: dispute.id,
     orderId: dispute.orderId,
     reason: dispute.reason,
-    summary: (dispute as any).summary ?? null,
-    openedBy: (dispute as any).openedBy,
-    priority: (dispute as any).priority ?? 'medium',
-    status: (dispute as any).status,
-    directResolutionUntil: dateOrNull((dispute as any).directResolutionUntil),
-    evidenceDueAt: dateOrNull((dispute as any).evidenceDueAt),
-    isReturn: (dispute as any).isReturn ?? false,
-    evidence: [],
-    sellerResponse: null,
-    returnEvidence: (dispute as any).returnEvidence ?? null,
-    resolution: (dispute as any).resolution ?? null,
-    createdAt: dateStr((dispute as any).createdAt),
-    resolvedAt: dateOrNull((dispute as any).resolvedAt),
+    summary: dispute.summary ?? null,
+    openedBy: dispute.openedBy,
+    priority: dispute.priority,
+    status: dispute.status,
+    directResolutionUntil: iso(dispute.directResolutionUntil),
+    evidenceDueAt: iso(dispute.evidenceDueAt),
+    isReturn: dispute.isReturn,
+    evidence: Array.isArray(dispute.evidence) ? dispute.evidence : [],
+    sellerResponse: dispute.sellerResponse ?? null,
+    returnEvidence: dispute.returnEvidence ?? null,
+    resolution: dispute.resolution ?? null,
+    createdAt: dispute.createdAt.toISOString(),
+    resolvedAt: iso(dispute.resolvedAt),
   };
 }
 
-function dateOrNull(val: unknown): string | null {
-  if (!val) return null;
-  if (val instanceof Date) return val.toISOString();
-  return String(val);
-}
-
-function dateStr(val: unknown): string {
-  if (!val) return new Date().toISOString();
-  if (val instanceof Date) return val.toISOString();
-  return String(val);
+function iso(value: Date | null): string | null {
+  return value ? value.toISOString() : null;
 }
